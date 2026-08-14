@@ -15,6 +15,9 @@ log/
 # PX4 logs
 *.ulg
 
+# ROS2 workspace log dir (colcon build/install already covered above)
+ros2_ws/log/
+
 # Model checkpoints
 *.pt
 *.pth
