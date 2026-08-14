@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Conda / venv (env lives outside the repo, but ignore if ever created locally)
+.venv/
+env/
+
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# PX4 logs
+*.ulg
+
+# Model checkpoints
+*.pt
+*.pth
+*.zip
+
+# Results and large artifacts
+results/
+
+# Editor / OS
+.vscode/
+.DS_Store
