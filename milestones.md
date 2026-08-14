@@ -4,7 +4,7 @@
 *why*. This file is the build order: what to do, in what sequence, and how to
 know each step actually works.
 
-Status: nothing built yet. Start at M0.
+Status: M0 done (2026-08-14). Next up: M1.
 
 ---
 
@@ -740,7 +740,7 @@ Update this as milestones complete.
 
 | Milestone | Status | Date | Notes |
 |---|---|---|---|
-| M0 | Not started | | |
+| M0 | Done | 2026-08-14 | Gazebo Harmonic 8.15.0, PyTorch 2.13+cu126 (CUDA verified), PX4 v1.17.0 SITL builds clean, 236 px4_msgs interfaces visible. See docs/environment.md for full toolchain record and setup deviations. |
 | M1 | Not started | | |
 | M2 | Not started | | |
 | M3 | Not started | | |
