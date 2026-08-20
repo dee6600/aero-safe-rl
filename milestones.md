@@ -38,6 +38,7 @@ All approved on 2026-08-14. These are settled — do not revisit them mid-build.
 | D3 | Repo renamed to **`aero-safe-rl`** |
 | D4 | Evaluation includes **C5** (perfect-detector upper bound) and **C6** (detector ablation) |
 | D5 | Simplified pre-training model **deferred** — revisit only if M1 shows training is impossible |
+| D6 | Simulator backend: **Gazebo Harmonic stays primary** for M1–M12; Isaac Sim added only as an optional, non-blocking parallel learning track |
 
 **Why D2 changed shape.** The original idea was to change the motor's strength
 setting live over Gazebo's messaging system. On inspection, Gazebo's stock motor
@@ -50,6 +51,19 @@ multiplies one rotor's thrust by an efficiency number between 0 and 1 that we
 can change at any moment from outside. This is the honest way to simulate a
 weakening motor: **PX4 never learns about it**, it only feels the aircraft
 behaving oddly — which is exactly the situation our detector must handle.
+
+**Why D6 exists.** Isaac Sim was considered as a full replacement for Gazebo
+(2026-08-15), partly to learn the tool. Declined for the research pipeline:
+Isaac Sim 5.1's stated minimum GPU is an RTX 4080 16GB, this machine's RTX
+2070 (8GB) sits below it, and M8's design deliberately runs a full separate
+PX4 process per parallel instance (so PX4 never sees the fault) — which
+conflicts with Isaac Sim's single-GPU-per-instance guidance and would likely
+collapse 4 planned parallel instances down to 1. It also weakens M12's
+reproducibility story (NVIDIA account + heavy GPU vs. free/apt-installable
+Gazebo). Full reasoning in `planning.md` §14 (D6) and §10b. Isaac Sim +
+Pegasus Simulator (a mature, actively-maintained third-party PX4 bridge for
+it) is being set up as a separate learning track — see below — and must never
+gate M5–M12.
 
 ---
 
@@ -731,6 +745,26 @@ it is more useful for paper figures and the demo video, and it does not require
 a running simulator to develop against.
 
 No database, no login, no containers.
+
+---
+
+## Parallel track — Isaac Sim (learning, optional)
+
+Can start any time — no dependency on any other milestone. Not required for
+any research result, so it must never delay M5–M9. See `planning.md` §10b
+and §14 (D6) for the full reasoning behind keeping this off the main path.
+
+Stack: Isaac Sim (pip install, its own conda env, kept separate from
+`aero-safe-rl`) + Pegasus Simulator's PX4 MAVLink backend, driving the same
+pinned PX4 `v1.17.0` binary. Goal: get the x500 quad flying the M3 baseline
+mission in Isaac Sim, single instance. Stretch goal: port the rotor
+degradation fault via an `omni.physx` physics-step callback instead of a
+compiled plugin — plausibly *simpler* than the Gazebo version.
+
+This machine's RTX 2070 (8GB) is under Isaac Sim's stated minimum spec.
+Expect real performance ceilings and treat them as expected, not a problem to
+solve — this track exists for learning, not for a number that ends up in the
+paper.
 
 ---
 

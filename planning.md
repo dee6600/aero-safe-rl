@@ -617,6 +617,29 @@ containerisation.
 
 ---
 
+## 10b. Isaac Sim track (later, parallel, optional — decision D6)
+
+Not a research dependency. Exists for hands-on learning and, if it goes well,
+a small cross-simulator validation data point in the paper. **Must never gate
+Phases 5–12**, and must never be the environment M8 trains on.
+
+- **Stack** — Isaac Sim (pip-installed, own conda env, isolated from
+  `aero-safe-rl`) + Pegasus Simulator's PX4 `MavlinkBackend`, driving the same
+  pinned PX4 `v1.17.0` SITL binary over MAVLink instead of gz-transport.
+- **Scope** — port the x500 quadrotor and, if time allows, a single-instance
+  version of the `RotorDegradationSystem` fault (via an `omni.physx`
+  per-physics-step callback rather than a compiled plugin) far enough to fly
+  the Phase 3 baseline mission. No RL training here.
+- **Known constraint** — this machine's RTX 2070 (8 GB) is below Isaac Sim's
+  stated minimum spec (see the D6 note above). Expect to run single-instance,
+  possibly with reduced rendering fidelity, and to hit real performance
+  ceilings — that is expected and fine for a learning track, not a blocker to
+  fix.
+- **Not required for**: any number in the paper. If it never produces a
+  usable result, nothing above it changes.
+
+---
+
 ## 11. Repository / module responsibilities
 
 ```
@@ -717,6 +740,7 @@ In order. Do not begin Phase 1 until Phase 0's validation passes.
 | **D3** | Repo directory name | ✅ Rename `aero-safe-rf` → **`aero-safe-rl`**. |
 | **D4** | Conditions C5 (oracle detection) and C6 (detector ablation) | ✅ **Included** in the evaluation matrix. |
 | **D5** | Reduced-order pre-training model | ✅ **Deferred.** Revisit only if M1 throughput measurements prove PX4-in-the-loop training unreachable. |
+| **D6** | Isaac Sim as the simulator backend | ✅ **Declined for the research pipeline.** Gazebo Harmonic stays primary for M1–M12. Isaac Sim adopted only as an optional, non-blocking parallel learning track. See §10b and the note below. |
 
 ### Note on D2 — refinement after inspecting the code
 
@@ -741,6 +765,45 @@ It lives in **our** repository and is loaded via `GZ_SIM_SYSTEM_PLUGIN_PATH`
 plus a line in our own copy of the x500 SDF. That keeps PX4 completely stock
 (principle #3) and decouples the fault framework from the PX4 version — the
 plugin survives a future PX4 bump.
+
+### Note on D6 — Isaac Sim considered and declined for the primary pipeline (2026-08-15)
+
+The question was raised after M0 completed: switch the simulator backend from
+Gazebo Harmonic to NVIDIA Isaac Sim, partly to learn the tool. Investigated
+before deciding rather than guessing:
+
+- **No native PX4 integration.** The pinned PX4 `v1.17.0` source has no Isaac
+  Sim SITL target (checked directly — only Gazebo/jMAVSim/FlightGear/JSBSim
+  are wired into the Makefile). The real integration path is **Pegasus
+  Simulator**, a third-party framework with a MAVLink-based PX4 backend. This
+  part is solid: actively maintained, committed through 2027, synced to
+  current Isaac Sim releases.
+- **GPU is under Isaac Sim's own stated minimum.** Isaac Sim 5.1's minimum is
+  an RTX 4080 with 16 GB VRAM; even the older 4.5 baseline was RTX 3070 8 GB.
+  This machine's RTX 2070 Max-Q (8 GB, Turing) sits below both — real risk of
+  poor performance or instability, not just "slower."
+- **Conflicts with the Phase 8 parallelism plan.** Isaac Sim's efficient
+  parallelism (thousands of robots in one GPU context via Isaac Lab) doesn't
+  apply here: this project deliberately keeps a full separate PX4 process per
+  vehicle, so PX4 never learns about the fault (principle #5). That means N
+  genuinely separate heavy GPU contexts, not vectorized envs — NVIDIA's own
+  guidance is one instance per 8 GB card. The planned 4 parallel SITL
+  instances (§7.4) would likely collapse to 1, stretching Phase 8's
+  already-flagged risk budget considerably.
+- **Reproducibility cost.** Gazebo is apt-installable, free, no login. Isaac
+  Sim gates readers behind an NVIDIA account and a much heavier GPU
+  requirement, working against Phase 12's "clean machine reproduces the
+  result" goal.
+- **One genuine upside, noted for the record.** Isaac Sim's Python
+  physics-step callback API (`omni.physx`) could make fault injection
+  *easier* than the planned C++ gz-sim plugin — no compiled plugin needed.
+  This doesn't outweigh the GPU/parallelism risk above, but it's worth
+  remembering if D2 is ever revisited.
+
+**Resolution:** Gazebo remains the backbone for every research milestone.
+Isaac Sim + Pegasus Simulator is being set up as a separate, optional track
+(§10b) — useful for hands-on learning and possibly a small cross-simulator
+validation note in the paper later, but it must never gate M5–M12.
 
 ---
 
