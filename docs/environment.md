@@ -37,6 +37,36 @@ M0's "Done when" checks before trusting any later result.
 - Built with `colcon build --symlink-install`; `ros2 interface list | grep
   px4_msgs` returns 236 interfaces.
 
+## Simulated-time source (M2)
+
+- `python3-gz-transport13` + `python3-gz-msgs10`, installed via apt, living
+  under system Python's site-packages (`/usr/lib/python3/dist-packages`), NOT
+  the conda env. Confirmed importable from conda's Python 3.10 (matching
+  `cpython-310` ABI tag) via `simulation/sim_clock.py`, which appends that
+  path to `sys.path` itself.
+- Required because `px4_msgs` timestamps turned out to be unusable as a
+  simulated-time source — see `docs/parallelism.md` §2.5 for the measurement.
+  `simulation/sim_clock.py`'s `GzSimClock` reads Gazebo's own
+  `/world/<world>/stats` directly instead, and is what `PX4Clock` (and every
+  wait in the project from M2 onward, per D10) is built on.
+- `scripts/env_report.sh` checks both the DDS actuator-topics patch and these
+  bindings, and exits non-zero if either is missing.
+
+## PX4 → ROS 2 telemetry latency (M2)
+
+Measured with `scripts/measure_latency.py --instance 1 --seconds 10` against
+`sensor_combined`, instance 1, speed factor 1×, 978 samples after warmup:
+
+| Mean | Median | P95 | Min / Max | Stdev |
+|---|---|---|---|---|
+| 7.15 ms | 6.29 ms | 8.76 ms | 5.58 / 10.42 ms | 1.29 ms |
+
+Single-digit milliseconds as `planning.md` §5/M2 predicted. Measured via
+`time.time()` (`CLOCK_REALTIME`), which is the correct basis specifically
+*because* `px4_msgs` timestamps are wall-clock-resynced by `uxrce_dds_client`
+(see the sim-time note above and `docs/parallelism.md` §2.5) — both sides of
+the comparison are already in the same clock domain.
+
 ## Python / ML (conda env `aero-safe-rl`)
 
 - Python 3.10.20

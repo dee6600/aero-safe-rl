@@ -6,6 +6,14 @@ is a NEGATIVE number in vehicle_local_position.z / vehicle_odometry.
 "5 metres up" is z = -5.0. Getting this backwards is the classic bug with
 this stack -- if a vehicle "climbs" straight into the ground, check the sign
 first.
+
+Every topic name and every VehicleCommand's target_system is derived from an
+InstanceSpec (simulation/instance_spec.py), never hardcoded. Two silent bugs
+shipped here before this was true: target_system fixed at 1 (dropped by
+Commander.cpp:746 on every instance except 0, with no error), and topic names
+hardcoded to /fmu/out/... (instance N>0 actually publishes on
+/px4_N/fmu/out/..., so the subscription succeeded and received nothing,
+forever). See docs/parallelism.md §2.1-2.2.
 """
 
 from rclpy.node import Node
@@ -26,8 +34,13 @@ from px4_msgs.msg import (
     VehicleStatus,
 )
 
+from simulation.instance_spec import InstanceSpec
+
 # Matches PX4's uxrce_dds_client QoS -- see px4_ros_com's offboard_control.py,
-# the reference example vendored in ros2_ws/src/px4_ros_com/.
+# the reference example vendored in ros2_ws/src/px4_ros_com/. A mismatch here
+# (e.g. RELIABLE instead of BEST_EFFORT) gives a subscription that silently
+# never fires -- the same symptom as a namespace mistake, from a different
+# cause, so it is worth remembering this exists as a second place to check.
 PX4_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -36,6 +49,9 @@ PX4_QOS = QoSProfile(
 )
 
 # The 9 telemetry topics M2 requires we can read, with sensible values.
+# Values are the topic SUFFIX passed to InstanceSpec.topic() -- never a full
+# path. Building a full "/fmu/out/..." string anywhere outside this file (or
+# InstanceSpec itself) is the bug this project has already hit once.
 #
 # NOTE: PX4 appends "_v<MESSAGE_VERSION>" to the DDS topic name for any
 # message whose .msg file declares MESSAGE_VERSION > 0 (a scheme for
@@ -47,45 +63,66 @@ PX4_QOS = QoSProfile(
 # output rather than assuming -- exactly the kind of thing M0 warned about
 # ("verify actual values, not just that a topic exists").
 TELEMETRY_TOPICS = {
-    'vehicle_odometry': ('/fmu/out/vehicle_odometry', VehicleOdometry),
-    'vehicle_attitude': ('/fmu/out/vehicle_attitude', VehicleAttitude),
-    'sensor_combined': ('/fmu/out/sensor_combined', SensorCombined),
-    'actuator_motors': ('/fmu/out/actuator_motors', ActuatorMotors),
-    'actuator_outputs': ('/fmu/out/actuator_outputs', ActuatorOutputs),
-    'vehicle_status': ('/fmu/out/vehicle_status_v1', VehicleStatus),
-    'battery_status': ('/fmu/out/battery_status_v1', BatteryStatus),
-    'failsafe_flags': ('/fmu/out/failsafe_flags', FailsafeFlags),
-    'estimator_status_flags': ('/fmu/out/estimator_status_flags', EstimatorStatusFlags),
+    'vehicle_odometry': ('vehicle_odometry', VehicleOdometry),
+    'vehicle_attitude': ('vehicle_attitude', VehicleAttitude),
+    'sensor_combined': ('sensor_combined', SensorCombined),
+    'actuator_motors': ('actuator_motors', ActuatorMotors),
+    'actuator_outputs': ('actuator_outputs', ActuatorOutputs),
+    'vehicle_status': ('vehicle_status_v1', VehicleStatus),
+    'battery_status': ('battery_status_v1', BatteryStatus),
+    'failsafe_flags': ('failsafe_flags', FailsafeFlags),
+    'estimator_status_flags': ('estimator_status_flags', EstimatorStatusFlags),
+}
+
+# Same treatment for the 3 command topics we publish to.
+COMMAND_TOPICS = {
+    'offboard_control_mode': ('offboard_control_mode', OffboardControlMode),
+    'trajectory_setpoint': ('trajectory_setpoint', TrajectorySetpoint),
+    'vehicle_command': ('vehicle_command', VehicleCommand),
 }
 
 
 class PX4Interface:
     """Wires up every PX4 telemetry subscription and command publisher this
-    project needs, on a given rclpy Node. Not a Node itself -- compose it
-    into whichever node needs PX4 access, so every node uses the identical
-    topic names, types, and QoS (no drift between nodes)."""
+    project needs, on a given rclpy Node, for one specific worker. Not a Node
+    itself -- compose it into whichever node needs PX4 access, so every node
+    uses the identical topic names, types, QoS and target_system for a given
+    instance (no drift between nodes, and no instance-0 special case)."""
 
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, spec: InstanceSpec):
         self.node = node
+        self.spec = spec
         self.latest = {name: None for name in TELEMETRY_TOPICS}
+        # Freshest message timestamp seen across ANY telemetry topic, in
+        # microseconds. Despite the name, this is NOT simulated time: PX4's
+        # uxrce_dds_client resynchronizes every published timestamp to the
+        # agent's WALL clock before it reaches ROS 2 (confirmed empirically
+        # during M2 -- see simulation/sim_clock.py's module docstring for the
+        # measurement). Useful only as a link-freshness indicator ("has
+        # anything arrived recently?"). PX4Clock's sim-time source is
+        # GzSimClock (simulation/sim_clock.py), never this field.
+        self.last_timestamp_us = None
         self._subs = []
 
-        for name, (topic, msg_type) in TELEMETRY_TOPICS.items():
+        for name, (suffix, msg_type) in TELEMETRY_TOPICS.items():
             sub = node.create_subscription(
-                msg_type, topic,
+                msg_type, spec.topic(suffix, 'out'),
                 self._make_callback(name), PX4_QOS)
             self._subs.append(sub)
 
         self.offboard_control_mode_pub = node.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', PX4_QOS)
+            OffboardControlMode, spec.topic('offboard_control_mode', 'in'), PX4_QOS)
         self.trajectory_setpoint_pub = node.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', PX4_QOS)
+            TrajectorySetpoint, spec.topic('trajectory_setpoint', 'in'), PX4_QOS)
         self.vehicle_command_pub = node.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', PX4_QOS)
+            VehicleCommand, spec.topic('vehicle_command', 'in'), PX4_QOS)
 
     def _make_callback(self, name):
         def _cb(msg):
             self.latest[name] = msg
+            ts = getattr(msg, 'timestamp', None)
+            if ts and (self.last_timestamp_us is None or ts > self.last_timestamp_us):
+                self.last_timestamp_us = ts
         return _cb
 
     def _now_us(self) -> int:
@@ -114,7 +151,10 @@ class PX4Interface:
         msg.timestamp = self._now_us()
         self.trajectory_setpoint_pub.publish(msg)
 
-    def publish_vehicle_command(self, command: int, **params) -> None:
+    def build_vehicle_command(self, command: int, **params) -> VehicleCommand:
+        """Constructs (but does not publish) a VehicleCommand. Split out from
+        publish_vehicle_command so field construction -- in particular
+        target_system -- can be unit tested without a live DDS round trip."""
         msg = VehicleCommand()
         msg.command = command
         msg.param1 = params.get('param1', 0.0)
@@ -124,13 +164,20 @@ class PX4Interface:
         msg.param5 = params.get('param5', 0.0)
         msg.param6 = params.get('param6', 0.0)
         msg.param7 = params.get('param7', 0.0)
-        msg.target_system = 1
+        # MAV_SYS_ID = instance + 1 (PX4 rcS). Commander.cpp:746 drops any
+        # command whose target_system matches neither 0 nor this value, with
+        # no error -- a hardcoded 1 here is the single bug that made every
+        # instance above 0 silently ignore arm/offboard/land.
+        msg.target_system = self.spec.mav_sys_id
         msg.target_component = 1
         msg.source_system = 1
         msg.source_component = 1
         msg.from_external = True
         msg.timestamp = self._now_us()
-        self.vehicle_command_pub.publish(msg)
+        return msg
+
+    def publish_vehicle_command(self, command: int, **params) -> None:
+        self.vehicle_command_pub.publish(self.build_vehicle_command(command, **params))
 
     def arm(self) -> None:
         self.publish_vehicle_command(

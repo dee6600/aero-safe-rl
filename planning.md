@@ -1041,7 +1041,7 @@ budget is reachable.**
 | **D7** | Simulator topology for parallel runs | ✅ **One drone per world**, `GZ_PARTITION`-isolated (settled 2026-08-20). `drones_per_world` exists as a parameter so Phase 4 can *measure* the hybrid and shared topologies; no phase depends on building them. Silent, unchosen sharing stays prohibited. |
 | **D8** | Who owns the Gazebo server process | ✅ **We do** — `PX4_GZ_STANDALONE=1`, server started and PID-tracked by our launcher, so one worker can be restarted without touching its siblings. |
 | **D9** | Instance identity | ✅ **Uniform, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for every N; `target_system = N+1` always; identity computed once in `simulation/instance_spec.py` and published as `instance_<N>.json`. |
-| **D10** | Timing source in flight logic | ✅ **Simulated time only.** Wall clock is permitted solely in the hang watchdog. |
+| **D10** | Timing source in flight logic | ✅ **Simulated time only, sourced from `GzSimClock`** (Gazebo's native clock over gz-transport) — not `px4_msgs` timestamps, which M2 measured to track wall clock almost exactly regardless of speed factor (`uxrce_dds_client`'s session-level resync). Wall clock is permitted solely in the hang watchdog. See `docs/parallelism.md` §2.5. |
 | **D11** | Reproducibility standard | ✅ **Statistical, not bitwise** — see §7.5. Pure functions of recorded data are bitwise reproducible; whole-pipeline results are reproducible within a divergence band measured in Phase 3. |
 
 ### Note on D7–D11 — what the review found

@@ -130,8 +130,16 @@ settling wait, and rate limit written against wall clock silently changes
 meaning when the speed factor changes — and the speed factor *will* change
 between debugging (1×) and training (4–8×).
 
-- Mission and control logic times itself from **PX4 message timestamps** or the
-  Gazebo `/clock`, never `time.time()` / `time.sleep()`.
+- Mission and control logic times itself from **`simulation/sim_clock.py`'s
+  `GzSimClock`** (Gazebo's own `/world/<w>/stats`, read via native
+  gz-transport), never `time.time()` / `time.sleep()`. **Not** from
+  `px4_msgs` timestamps: found empirically during M2 that
+  `uxrce_dds_client` resynchronizes every published message's timestamp to
+  the agent's wall clock before it reaches ROS 2, so those timestamps track
+  real time almost exactly (measured ratio 0.991 at requested speed factor
+  4) regardless of the actual simulation rate. `GzSimClock`, reading
+  Gazebo's clock directly, gave the correct ratio (3.945) in the same test.
+  Full writeup: `simulation/sim_clock.py`'s module docstring.
 - Wall clock is allowed for exactly one thing: the **watchdog** that decides a
   worker is hung. That one *must* be wall-clock, and must be generous enough to
   survive a 1× run.

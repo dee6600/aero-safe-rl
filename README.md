@@ -273,7 +273,7 @@ detector that spots a weakening motor PX4 itself never notices.
 | D7 | **One drone per world**, `GZ_PARTITION`-isolated; hybrid and shared topologies are benchmarked in M4 but not built; silent unchosen sharing stays prohibited |
 | D8 | **We own the Gazebo server process** so a single worker can be restarted without touching its siblings |
 | D9 | **Uniform instance identity**, no special case for instance 0; derived once and published as a file |
-| D10 | **Sim time is the only clock** in flight logic; wall clock only in the hang watchdog |
+| D10 | **Sim time is the only clock** in flight logic, from `GzSimClock` (Gazebo's own clock) — not `px4_msgs` timestamps, which track wall clock regardless of speed factor; wall clock only in the hang watchdog |
 | D11 | **Reproducibility is statistical, not bitwise** — pure functions are exact, whole-pipeline results reproduce within a measured band |
 
 Full reasoning for each: [`planning.md` §14](planning.md#14-decisions--all-approved-2026-08-14).

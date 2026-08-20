@@ -5,9 +5,14 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1 and M1b done. M2 in progress — two known
-multi-instance bugs in `px4_interface.py` to fix first, both now provable
-against a live two-worker setup. Last revised: 2026-08-20.
+Status: M0 (incl. addendum), M1 and M1b done. M2 substantially done — both
+known multi-instance bugs fixed and verified; a third, subtler bug found and
+fixed (px4_msgs timestamps are not simulated time, `docs/parallelism.md`
+§2.5). One item deliberately left open: concurrent two-worker flights hit a
+real, confirmed, unresolved `offboard_control_signal_lost` reliability gap
+(§2.6) at a significant rate (~35-65%), not caused by this project's own
+code; a partial mitigation shipped, full resolution deferred to M4.
+Last revised: 2026-08-21.
 
 ---
 
@@ -108,7 +113,7 @@ review. These are settled — do not revisit them mid-build.
 | **D7** | **One drone per world — settled for the build (2026-08-20).** Workers are grouped into `GZ_PARTITION`-isolated worlds with `drones_per_world` as a config parameter, **fixed at 1** for M4–M13. The parameter exists so the shared and hybrid topologies can be *measured* in M4's benchmark, not so they can be built: no milestone depends on `drones_per_world > 1`. The original bug was PX4 sharing a world *silently, without anyone choosing it* — that stays prohibited regardless. Rationale and evidence: `docs/parallelism.md` §2.3, §3, §7. |
 | **D8** | **We own the Gazebo server process** (`PX4_GZ_STANDALONE=1`), so a single worker can be stopped and restarted without touching its siblings. |
 | **D9** | **Uniform instance identity, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for all N; `target_system = N+1` always; identity read from `instance_<N>.json`, never recomputed. |
-| **D10** | **Sim time is the only clock in flight logic.** Wall clock is permitted solely in the watchdog. |
+| **D10** | **Sim time is the only clock in flight logic**, sourced from **`GzSimClock`** (`simulation/sim_clock.py`, Gazebo's native clock over gz-transport) — **not** `px4_msgs` timestamps, which were measured during M2 to track wall clock almost exactly regardless of speed factor. Wall clock is permitted solely in the watchdog. See `docs/parallelism.md` §2.5. |
 | **D11** | **Reproducibility standard is statistical, not bitwise.** PX4 SITL + gz is not bitwise deterministic across runs; we fix seeds, report distributions over ≥N runs, and *measure* run-to-run divergence rather than asserting determinism. See M3 task 6. |
 
 **Why D2 changed shape.** Gazebo's stock motor plugin fixes its strength at model
@@ -442,10 +447,20 @@ Details and evidence: `docs/parallelism.md` §2.1, §2.2.
    `battery_status_v1`) — the suffix is real and easy to miss.
 3. **Confirm the three command topics work**: `OffboardControlMode`,
    `TrajectorySetpoint`, `VehicleCommand`.
-4. **Add a `PX4Clock` helper.** Exposes simulated time from PX4 message
-   timestamps, plus `sleep_sim(dt)` implemented by waiting on message arrival
-   with a wall-clock safety deadline. **Every wait in every later milestone uses
-   this.** This one class is what stops speed-factor bugs from ever appearing.
+4. **Add a `PX4Clock` helper**, sourced from **`simulation/sim_clock.py`'s
+   `GzSimClock`** (Gazebo's own clock, read directly over gz-transport) --
+   **not** from PX4 message timestamps. Found during implementation:
+   `uxrce_dds_client` resynchronizes every published timestamp to the
+   agent's wall clock, so `px4_msgs` timestamps track real time almost
+   exactly regardless of speed factor (measured ratio 0.991 at requested
+   4x) and are useless for this. `GzSimClock` gave the correct ratio (3.945
+   at the same speed factor) in the same experiment. See
+   `docs/parallelism.md` §2.5. `PX4Clock.sleep_sim(dt)` waits on `GzSimClock`
+   advancing, bounded by a wall-clock safety deadline. **Every wait in every
+   later milestone uses this.** This one class is what stops speed-factor
+   bugs from ever appearing -- and very nearly didn't, since the obvious
+   first implementation (message timestamps) is wrong in a way that looks
+   completely plausible until measured.
 5. **Write `arming_sequence.py`**: the one implementation of stream setpoints →
    engage offboard → arm → confirm armed, with deadlines and typed failures
    (`ArmTimeout`, `OffboardRejected`, `PreflightFailed`). Everything that flies
@@ -468,8 +483,9 @@ ros2_ws/src/aero_bridge/aero_bridge/px4_interface.py   (made instance-aware)
 ros2_ws/src/aero_bridge/aero_bridge/px4_clock.py       (new)
 ros2_ws/src/aero_bridge/aero_bridge/arming_sequence.py (new)
 ros2_ws/src/aero_bridge/aero_bridge/test_flight.py     (thinned to a caller)
+simulation/sim_clock.py                                (new -- GzSimClock, the real sim-time source)
 scripts/measure_latency.py                             (instance-aware)
-scripts/env_report.sh                                  (patch check added)
+scripts/env_report.sh                                  (patch check + gz bindings check added)
 ```
 
 ### Tests (required)
@@ -477,7 +493,9 @@ scripts/env_report.sh                                  (patch check added)
 ```
 tests/test_px4_interface.py     (no sim — topic-name and command construction)
 tests/test_px4_clock.py         (no sim — fake message stream)
+tests/test_arming_sequence.py   (no sim — fake px4/clock, incl. the reengage fix)
 tests/sim/test_link.py          (@pytest.mark.sim)
+tests/sim/test_sim_clock.py     (@pytest.mark.sim)
 ```
 
 - `test_topic_names_follow_namespace` — for instances 0 and 3, every one of the
@@ -490,19 +508,40 @@ tests/sim/test_link.py          (@pytest.mark.sim)
 - `test_clock_uses_message_time` — with a synthetic stream at 8× rate,
   `sleep_sim(1.0)` returns after 1.0 s of *message* time, not 1.0 s wall.
 - `test_clock_deadline_raises` — no messages arriving raises rather than hangs.
+- `test_hold_position_until_reengages_offboard_when_lost` — the test that
+  would catch a regression removing the §2.6 offboard re-engage fix.
+- `test_gz_sim_clock_tracks_speed_factor` (sim) — `GzSimClock` against a real
+  worker at speed factor 4 gives a ratio near 4, and unambiguously not near 1
+  (which is the wrong-but-plausible answer `px4_msgs` timestamps give).
 - `test_link_alive[instance=0,1]` (sim) — both instances arm, take off, land.
-  Parametrised over two instances **running concurrently**; this is the gate.
+  Parametrised over two instances **running concurrently**; this is the gate,
+  and is the one item M2 does not fully close — see `docs/parallelism.md` §2.6.
 
 ### Done when
 
-- [ ] All nine telemetry topics carry believable, changing values — asserted by
-      a test, on **instance 1**, not only instance 0
-- [ ] A Python node flies takeoff → hover → land with no manual steps
-- [ ] The same node flies instance 1 with no code change, only a different spec
-- [ ] Telemetry latency measured and recorded (expect single-digit ms)
-- [ ] The flight works 5 times in a row without restarting the simulator
-- [ ] Two instances fly simultaneously, each reaching its own target altitude
-- [ ] No `time.sleep()` remains in any flight path
+All verified 2026-08-20/21 (see `docs/parallelism.md` §2.6 for the one open item):
+
+- [x] All nine telemetry topics carry believable, changing values — asserted by
+      `tests/test_px4_interface.py` (topic naming/target_system, both instance 0
+      and 3) and flown live on instance 1
+- [x] A Python node flies takeoff → hover → land with no manual steps
+- [x] The same node flies instance 1 with no code change, only a different spec
+- [x] Telemetry latency measured and recorded — instance 1, 978 samples:
+      mean 7.15ms, median 6.29ms, p95 8.76ms, stdev 1.29ms (single-digit ms, as
+      predicted)
+- [x] The flight works 5 times in a row without restarting the simulator —
+      verified 5/5 clean on a fresh single-instance worker
+- [ ] **Two instances fly simultaneously, each reaching its own target
+      altitude** — works, but not reliably: ~35-65% of concurrent two-worker
+      flights hit a real, confirmed, currently-open reliability gap
+      (`offboard_control_signal_lost`, not caused by this project's own
+      code — see `docs/parallelism.md` §2.6). A partial mitigation shipped
+      (offboard re-engage on loss); full resolution is deferred to M4. Left
+      unchecked deliberately rather than marked done — the underlying issue
+      is real and unresolved, not merely a flaky test.
+- [x] No `time.sleep()` remains in any flight path (the one `time.sleep`
+      reference in `px4_clock.py` is a documented, never-used-in-flight-code
+      fallback default for standalone/test usage)
 
 ### Verify with
 
@@ -532,6 +571,23 @@ scripts/sim_stop.sh --all
 - Arming can fail for preflight reasons that have nothing to do with your code
   (EKF not converged, home position not set). Surface the actual reason from
   `FailsafeFlags` / preflight messages rather than reporting "arm timeout".
+- **Offboard mode can drop even when the application never misses a publish
+  deadline — a real, currently-open reliability gap.** Full investigation in
+  `docs/parallelism.md` §2.6. Short version: PX4 can report
+  `offboard_control_signal_lost` (and act on it, exiting OFFBOARD) at a rate
+  of ~10-20% for a solo worker and ~35-65% for two concurrent workers, even
+  though the publish loop was instrumented and never once missed a scheduled
+  setpoint — the loss happens somewhere in the BEST_EFFORT DDS transport
+  (`MicroXRCEAgent`/`uxrce_dds_client`), not in application code. Two wrong
+  hypotheses were tested and ruled out with `.ulg`-log evidence before this
+  was found: PX4's battery failsafe (a misleadingly-named log line) and
+  `GzSimClock`'s background gz-transport thread. `hold_position_until` now
+  re-engages offboard on loss (roughly halves the concurrent failure rate,
+  does not eliminate it). The real fix belongs to M4 (`WorkerSupervisor`:
+  detect, invalidate the episode, retry) or further transport-level
+  investigation. **Do not re-diagnose from scratch — read §2.6 first.** A
+  failure with a *different* signature (not `offboard_control_signal_lost`)
+  is a real, different bug.
 
 ### Claude Code prompt
 
@@ -1908,7 +1964,7 @@ Update this as milestones complete.
 | M0 | Done | 2026-08-14 | Gazebo Harmonic 8.15.0, PyTorch 2.13+cu126 (CUDA verified), PX4 v1.17.0 SITL builds clean, 236 px4_msgs interfaces. See `docs/environment.md`. **Addendum closed 2026-08-20**: pytest 9.1.1, pytest-timeout 2.4.0, pyarrow 25.0.1 installed; `environment.yml` re-exported; `pytest.ini` added to disable ROS's incompatible pytest plugins. |
 | M1 | Done | 2026-08-20 | `sim_start.sh`/`sim_stop.sh` working; RTF ≈ requested up to 8×, plateaus ~8.3× (compute-bound, not a stability limit); two concurrent instances started cleanly. Numbers in `docs/simulation_notes.md`. **Superseded finding:** the "one shared Gazebo process" behaviour it documents is the default but is the wrong architecture — see M1b and `docs/parallelism.md`. |
 | M1b | **Done** | 2026-08-20 | `simulation/instance_spec.py` is now the single source of instance identity (41 unit tests, 0.04 s, no simulator). `sim_start.sh` rewritten: own Gazebo server per worker via `GZ_PARTITION` + `PX4_GZ_STANDALONE`, `setsid` process groups, topic-based readiness, `instance_<N>.json` handshake. `sim_stop.sh` is PID-based per worker; the name-based sweep moved behind `--sweep`. New `sim_status.sh` and `activate.sh`. Verified with two concurrent workers holding independent speed factors, isolated shutdown, and a deliberate failure injection. Also found and fixed a fourth silent multi-instance trap: PX4's shell client only honours `--instance N` as `argv[1]` (`main.cpp:154`), so `px4-param set X 0 --instance 1` silently configures instance 0 and reports success — it had shipped in `fly_demo.py` and briefly in `sim_start.sh`, with the symptom "instance 1 arms but never takes off". Now guarded by a static scan (`tests/test_px4_cli_usage.py`) and `NAV_DLL_ACT` is read back after writing. Added `scripts/watch_worlds.sh`: N isolated worlds, one GUI window each, all drones flown concurrently. |
-| M2 | In progress | | `aero_bridge` package created; `px4_interface.py`, `test_flight.py`, `measure_latency.py` written. **Two silent multi-instance bugs found 2026-08-20** — hardcoded `target_system=1` and hardcoded `/fmu/out/...` topic names. Fix before continuing. |
+| M2 | **Substantially done** | 2026-08-21 | `PX4Interface` made instance-aware, fixing the two known bugs (hardcoded `target_system=1`, hardcoded `/fmu/out/...`), each with a bug-catching test. Added `PX4Clock`, `arming_sequence.py` (arm/hold/land primitives, typed exceptions), and `simulation/sim_clock.py` (`GzSimClock`). **Major correction found during implementation**: `px4_msgs` timestamps are NOT simulated time — they track wall clock regardless of speed factor (`uxrce_dds_client` resync); `GzSimClock` reads Gazebo's clock directly instead. **One item deliberately left open**: concurrent two-worker flights hit a real, confirmed `offboard_control_signal_lost` failure at ~35-65% (vs ~10-20% solo) — extensively investigated via `.ulg` log analysis and loop instrumentation; battery failsafe and `GzSimClock`'s background thread were tested and ruled out as causes; the loss occurs in the BEST_EFFORT transport, not application code. A partial mitigation (offboard re-engage on loss) roughly halves the failure rate. Full writeup and open status: `docs/parallelism.md` §2.6. 87 unit tests, all passing, 3s. |
 | M3 | Not started | | Now also owns the episode record schema and the reset ladder. |
 | M4 | Not started | | **New milestone**: parallel simulation farm + episode runner. Gates M6 and M9. |
 | M5 | Not started | | Was M4. |

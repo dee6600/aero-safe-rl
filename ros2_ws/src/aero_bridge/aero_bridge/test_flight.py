@@ -1,159 +1,113 @@
-"""M2 flight validation node: arm -> offboard -> takeoff to 5m -> hover ->
-land -> disarm, entirely over ROS 2 (no MAVLink, no manual steps).
+#!/usr/bin/env python3
+"""M2 flight check: arm -> engage offboard -> takeoff -> hover -> land ->
+disarm, entirely over ROS 2, no MAVLink. The flight-transition logic lives in
+arming_sequence.py; this file is orchestration only.
 
-NED reminder (see px4_interface.py docstring): z is negative-up. Takeoff
-altitude of 5m is z = -5.0.
+Works identically on any instance number -- pass --instance N to fly a
+worker started with `scripts/sim_start.sh -i N`. That is the whole point of
+M2 (see milestones.md): code that only works on instance 0 passes every test
+written before this and fails silently once a second worker exists.
 
-Usage: ros2 run aero_bridge test_flight [--ros-args -p hover_alt:=5.0 -p hover_seconds:=5.0]
+Usage: ros2 run aero_bridge test_flight --instance 1 --hover-alt 5.0
 """
+import argparse
+import os
 import sys
 
-import rclpy
-from rclpy.node import Node
-from px4_msgs.msg import VehicleStatus
-
-from aero_bridge.px4_interface import PX4Interface
-
-SETPOINT_RATE_HZ = 20.0  # must be >=20Hz or PX4 drops out of offboard
-ARM_AFTER_SETPOINTS = 15  # ~0.75s of setpoints streamed before engaging offboard+arm
-RETRY_EVERY_N_TICKS = 20  # resend arm+offboard roughly once per second while waiting
 ALT_REACHED_FRACTION = 0.85
-STATE_TIMEOUT_S = 30.0
+DEFAULT_HOVER_ALT_M = 5.0
+DEFAULT_HOVER_SECONDS = 5.0
+TAKEOFF_TIMEOUT_S = 30.0
 
 
-class TestFlight(Node):
-    def __init__(self, hover_alt: float, hover_seconds: float):
-        super().__init__('test_flight')
-        self.px4 = PX4Interface(self)
-        self.hover_alt = hover_alt
-        self.hover_seconds = hover_seconds
-        self.takeoff_z = -abs(hover_alt)
+def fly(instance: int, hover_alt: float, hover_seconds: float) -> int:
+    # Deferred: rclpy must be import(ed)/init()ed only after ROS_DOMAIN_ID is
+    # set in main(), or this process joins the wrong DDS domain and never
+    # sees the worker at all.
+    import rclpy
+    from rclpy.node import Node
 
-        self.state = 'STREAM_SETPOINTS'
-        self.state_entered_at = self._now()
-        self.setpoint_count = 0
-        self.hover_start = None
+    from simulation.instance_spec import InstanceSpec
+    from simulation.sim_clock import GzSimClock
+    from aero_bridge.px4_interface import PX4Interface
+    from aero_bridge.px4_clock import PX4Clock
+    from aero_bridge.arming_sequence import (
+        FlightSequenceError, arm_and_engage_offboard, hold_position_until, land_and_wait,
+    )
 
-        self.timer = self.create_timer(1.0 / SETPOINT_RATE_HZ, self._tick)
-        self.get_logger().info(
-            f"test_flight starting: hover_alt={hover_alt}m hover_seconds={hover_seconds}s")
+    spec = InstanceSpec.for_instance(instance)
+    node = Node('test_flight')
+    px4 = PX4Interface(node, spec)
+    # Sim time comes from Gazebo directly, NOT from px4_msgs timestamps --
+    # those are silently resynced to wall clock by uxrce_dds_client and are
+    # useless for this. See simulation/sim_clock.py's module docstring for
+    # the measurement that found this.
+    gz_clock = GzSimClock(world=spec.world, gz_partition=spec.gz_partition)
+    clock = PX4Clock(now_us_fn=gz_clock.now_us,
+                      pump_fn=lambda t: rclpy.spin_once(node, timeout_sec=t))
+    takeoff_z = -abs(hover_alt)
+    log = node.get_logger()
 
-    def _now(self) -> float:
-        return self.get_clock().now().nanoseconds / 1e9
-
-    def _elapsed_in_state(self) -> float:
-        return self._now() - self.state_entered_at
-
-    def _goto(self, state: str) -> None:
-        self.get_logger().info(f"state: {self.state} -> {state}")
-        self.state = state
-        self.state_entered_at = self._now()
-
-    def _current_altitude(self):
-        """Returns altitude in metres (positive up), or None if no odometry yet."""
-        odom = self.px4.latest['vehicle_odometry']
-        if odom is None:
-            return None
-        return -odom.position[2]
-
-    def _nav_state(self):
-        status = self.px4.latest['vehicle_status']
-        return status.nav_state if status is not None else None
-
-    def _armed(self) -> bool:
-        status = self.px4.latest['vehicle_status']
-        return status is not None and status.arming_state == VehicleStatus.ARMING_STATE_ARMED
-
-    def _tick(self) -> None:
-        # Offboard control mode must be streamed continuously, in every state
-        # from before arming through to landing.
-        self.px4.publish_offboard_heartbeat(position=True)
-
-        if self.state == 'STREAM_SETPOINTS':
-            self.px4.publish_position_setpoint(0.0, 0.0, self.takeoff_z)
-            self.setpoint_count += 1
-            if self.setpoint_count >= ARM_AFTER_SETPOINTS:
-                self.px4.engage_offboard_mode()
-                self.px4.arm()
-                self._goto('WAIT_ARMED_OFFBOARD')
-
-        elif self.state == 'WAIT_ARMED_OFFBOARD':
-            self.px4.publish_position_setpoint(0.0, 0.0, self.takeoff_z)
-            if self._armed() and self._nav_state() == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-                self._goto('TAKEOFF')
-            elif self._elapsed_in_state() > STATE_TIMEOUT_S:
-                self.get_logger().error("timed out waiting for arm + offboard mode")
-                self._fail()
-            elif int(self._elapsed_in_state() * SETPOINT_RATE_HZ) % RETRY_EVERY_N_TICKS == 0:
-                # arm()/engage_offboard_mode() are sent over BEST_EFFORT QoS
-                # with no retry -- a single lost message (DDS discovery not
-                # yet settled, a CPU-contention hiccup from e.g. the Gazebo
-                # GUI competing for cycles) leaves the vehicle stuck here
-                # forever. Confirmed by testing: this state's one-shot
-                # version worked reliably headless but intermittently hung
-                # with the GUI on. Resend periodically instead of once.
-                self.px4.engage_offboard_mode()
-                self.px4.arm()
-
-        elif self.state == 'TAKEOFF':
-            self.px4.publish_position_setpoint(0.0, 0.0, self.takeoff_z)
-            alt = self._current_altitude()
-            if alt is not None and alt >= self.hover_alt * ALT_REACHED_FRACTION:
-                self.hover_start = self._now()
-                self._goto('HOVER')
-            elif self._elapsed_in_state() > STATE_TIMEOUT_S:
-                self.get_logger().error(f"timed out reaching takeoff altitude (last alt={alt})")
-                self._fail()
-
-        elif self.state == 'HOVER':
-            self.px4.publish_position_setpoint(0.0, 0.0, self.takeoff_z)
-            if self._now() - self.hover_start >= self.hover_seconds:
-                self._goto('LAND')
-
-        elif self.state == 'LAND':
-            self.px4.land()
-            if self._elapsed_in_state() > 1.0:
-                self._goto('WAIT_LANDED')
-
-        elif self.state == 'WAIT_LANDED':
-            if not self._armed():
-                self.get_logger().info("landed and disarmed")
-                self._succeed()
-            elif self._elapsed_in_state() > STATE_TIMEOUT_S:
-                self.get_logger().error("timed out waiting for disarm after land")
-                self._fail()
-
-    def _succeed(self) -> None:
-        # rclpy.shutdown() alone does NOT reliably break rclpy.spin()'s loop
-        # when called from inside a timer callback -- confirmed by testing:
-        # every run left its process alive indefinitely, still spinning,
-        # until killed externally. SystemExit propagates through rclpy's
-        # executor (it isn't caught by a plain `except Exception`) and
-        # actually terminates the process -- this is the same pattern the
-        # vendored px4_ros_com reference example uses (its timer_callback
-        # calls exit(0) directly), which is why it was chosen here too.
-        raise SystemExit(0)
-
-    def _fail(self) -> None:
-        raise SystemExit(1)
-
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = TestFlight(hover_alt=5.0, hover_seconds=5.0)
-    code = 1
     try:
-        rclpy.spin(node)
-    except SystemExit as e:
-        code = e.code if isinstance(e.code, int) else 0
-    except KeyboardInterrupt:
-        code = 1
+        arm_and_engage_offboard(node, px4, clock, takeoff_z=takeoff_z)
+        log.info("armed, offboard engaged")
+
+        def altitude_reached() -> bool:
+            odom = px4.latest['vehicle_odometry']
+            return odom is not None and -odom.position[2] >= hover_alt * ALT_REACHED_FRACTION
+
+        hold_position_until(node, px4, clock, x=0.0, y=0.0, z=takeoff_z,
+                             is_reached=altitude_reached, timeout_s=TAKEOFF_TIMEOUT_S,
+                             description=f"reach {hover_alt}m")
+        log.info(f"reached takeoff altitude ({hover_alt}m)")
+
+        hover_start_us = clock.now_us()
+
+        def hovered_long_enough() -> bool:
+            now_us = clock.now_us()
+            return now_us is not None and now_us - hover_start_us >= hover_seconds * 1e6
+
+        hold_position_until(node, px4, clock, x=0.0, y=0.0, z=takeoff_z,
+                             is_reached=hovered_long_enough,
+                             timeout_s=hover_seconds + 15.0,
+                             description=f"hover {hover_seconds}s")
+        log.info("hover complete")
+
+        land_and_wait(node, px4, clock)
+        log.info("landed and disarmed")
+        return 0
+    except FlightSequenceError as exc:
+        log.error(str(exc))
+        return 1
     finally:
-        try:
-            node.destroy_node()
-            rclpy.shutdown()
-        except Exception:
-            pass
+        gz_clock.close()
+        node.destroy_node()
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--instance', type=int, default=0)
+    ap.add_argument('--hover-alt', type=float, default=DEFAULT_HOVER_ALT_M)
+    ap.add_argument('--hover-seconds', type=float, default=DEFAULT_HOVER_SECONDS)
+    # ros2 run passes --ros-args ... through; argparse would otherwise choke
+    # on the unrecognized flag.
+    args, _ = ap.parse_known_args(argv)
+
+    # ROS_DOMAIN_ID must match the worker's before rclpy (and the DDS layer
+    # underneath it) initialises -- it cannot be changed afterwards. Every
+    # instance's domain is its instance number (D9), so this is the one env
+    # var a client MUST set itself rather than relying on the caller to have
+    # exported it. Topic naming/target_system are handled separately by
+    # InstanceSpec + PX4Interface and don't need an env var.
+    from simulation.instance_spec import InstanceSpec
+    os.environ['ROS_DOMAIN_ID'] = str(InstanceSpec.for_instance(args.instance).ros_domain_id)
+
+    import rclpy
+    rclpy.init()
+    try:
+        code = fly(args.instance, args.hover_alt, args.hover_seconds)
+    finally:
+        rclpy.shutdown()
     sys.exit(code)
 
 
