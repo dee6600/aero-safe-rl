@@ -2,9 +2,10 @@
 
 **Planning document — roadmap only. No implementation.**
 
-Status: pre-Phase-0. Repository initialised, environment tooling in place;
-no simulation, ROS, or ML code written yet.
-Last updated: 2026-08-14
+Status: Phase 1 done. Toolchain pinned and verified (Phase 0); headless
+SITL scripted, RTF and max stable speed factor measured, multi-instance
+confirmed conflict-free (Phase 1). Next: Phase 2 (ROS 2 ↔ PX4).
+Last updated: 2026-08-20
 
 ---
 
@@ -213,15 +214,16 @@ Rough effort estimates assume part-time work; they are for sequencing, not commi
 - **Deliverables**
   - ✅ Git repo initialised at `~/projects/aero-safe-rl` (renamed from `aero-safe-rf`).
   - ✅ Miniconda installed (`~/miniconda3`); empty conda env `aero-safe-rl` created (Python 3.10).
-  - Directory scaffold: `configs/ simulation/ ros2_ws/ ai/ rl/ experiments/ dashboard/ scripts/ tests/ results/ docs/`.
-  - Gazebo Harmonic installed from `packages.osrfoundation.org`, coexisting with Classic 11.
-  - Pinned package list installed **into the `aero-safe-rl` conda env** (not system Python), recorded via `environment.yml`:
-    PyTorch+CUDA, Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas, PyYAML, matplotlib.
-  - PX4 pinned to a stable tag on a project branch (**decision D1, §14**).
-  - `MicroXRCEAgent` built; `px4_msgs` + `px4_ros_com` cloned at commits matching the PX4 tag.
-  - `docs/environment.md` recording every version; `scripts/env_report.sh` emitting them as JSON.
+  - ✅ Directory scaffold created: `configs/ simulation/ ros2_ws/ ai/ rl/ experiments/ scripts/ tests/ results/ docs/`
+    (`dashboard/` deliberately deferred — not needed until its parallel track starts, §10).
+  - ✅ Gazebo Harmonic 8.15.0 installed from `packages.osrfoundation.org`, coexisting with Classic 11.
+  - ✅ Pinned package list installed **into the `aero-safe-rl` conda env** (not system Python), recorded via `environment.yml`:
+    PyTorch 2.13+cu126, Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas, PyYAML, matplotlib, TensorBoard.
+  - ✅ PX4 pinned to `v1.17.0` on branch `aero-safe-rl` (**decision D1, §14**).
+  - ✅ `MicroXRCEAgent` built (to `~/.local`); `px4_msgs` (`release/1.17`) + `px4_ros_com` (`main`) vendored at commits matching the PX4 tag.
+  - ✅ `docs/environment.md` recording every version; `scripts/env_report.sh` emitting them as JSON.
 - **Tech** — apt, git, **conda**, colcon, CMake.
-- **Validation** — `scripts/env_report.sh` runs clean; `conda activate aero-safe-rl && python -c "import torch; torch.cuda.is_available()"` → `True` on the RTX 2070; `gz sim --versions` reports 8.x; PX4 builds `make px4_sitl` without errors.
+- **Validation** — ✅ all passed: `scripts/env_report.sh` runs clean; `conda activate aero-safe-rl && python -c "import torch; torch.cuda.is_available()"` → `True` on the RTX 2070; `gz sim --versions` reports 8.15.0; PX4 builds `make px4_sitl` without errors.
 
 > ⚠️ `px4_msgs` **must** match the pinned PX4 tag. Mismatched uORB message
 > definitions fail silently — topics appear but fields are garbage. This is the
@@ -234,11 +236,17 @@ Rough effort estimates assume part-time work; they are for sequencing, not commi
 
 - **Goal** — Reliable, headless, scriptable, deterministic-as-possible SITL.
 - **Deliverables**
-  - `scripts/sim_start.sh` launching `make px4_sitl gz_x500` headless.
-  - Verified `PX4_SIM_SPEED_FACTOR` behaviour and the max stable factor on this machine (measure it — do not assume).
-  - Documented instance-isolation scheme (ports, `PX4_GZ_MODEL_POSE`, `ROS_DOMAIN_ID`) for parallel SITL later.
+  - ✅ `scripts/sim_start.sh` (+ `sim_stop.sh`) launching PX4 SITL + Gazebo headless,
+    with configurable instance, world, speed factor, and spawn pose.
+  - ✅ Verified `PX4_SIM_SPEED_FACTOR` behaviour and the max stable factor on this
+    machine: ~8× (compute-bound ceiling — requesting 16× does not exceed it;
+    flight itself stayed stable at every tested factor). See `docs/simulation_notes.md`.
+  - ✅ Documented instance-isolation scheme (ports, `PX4_GZ_MODEL_POSE`) for parallel
+    SITL later — `ROS_DOMAIN_ID` isolation deferred to Phase 2, where ROS 2 is introduced.
 - **Tech** — PX4 SITL, gz-sim 8, gz-transport.
-- **Validation** — Vehicle arms and holds altitude in headless mode; RTF measured and logged; two SITL instances run concurrently without port or DDS collisions.
+- **Validation** — ✅ all passed: vehicle arms and holds altitude (5 m) in headless mode;
+  RTF measured and logged at 1/2/4/8/16× requested; two SITL instances run concurrently
+  without port or messaging collisions.
 
 ---
 
@@ -698,8 +706,8 @@ aero-safe-rl/
 
 | Phase | Done when |
 |---|---|
-| **0** | `scripts/env_report.sh` emits complete version JSON; CUDA verified inside the `aero-safe-rl` conda env; PX4 pinned tag builds; `px4_msgs` matched to that tag; `docs/environment.md` written |
-| **1** | Headless SITL arms, hovers, lands from a script; measured RTF and max stable speed factor documented; 2 concurrent instances verified |
+| **0** | ✅ `scripts/env_report.sh` emits complete version JSON; CUDA verified inside the `aero-safe-rl` conda env; PX4 pinned tag builds; `px4_msgs` matched to that tag; `docs/environment.md` written |
+| **1** | ✅ Headless SITL arms, hovers, lands from a script; measured RTF and max stable speed factor documented (~8×, compute-bound, see `docs/simulation_notes.md`); 2 concurrent instances verified |
 | **2** | Takeoff→hover→land driven entirely from a ROS 2 Python node; telemetry latency measured; all required topics confirmed carrying valid data |
 | **3** | 20/20 healthy missions succeed; position RMSE noise floor across seeds documented |
 | **4** | Feature vector logged for a full healthy mission with no gaps; replay determinism verified; normalisation stats frozen |
@@ -716,18 +724,21 @@ aero-safe-rl/
 
 ## 13. Immediate next steps
 
-In order. Do not begin Phase 1 until Phase 0's validation passes.
+Phase 0 and Phase 1 are both complete (see status line at top and §12).
 
-1. ✅ **Decisions D1–D5 resolved** (§14) — all approved.
+1. ✅ **Decisions D1–D6 resolved** (§14) — all approved.
 2. ✅ **Repo renamed and initialised** (`aero-safe-rf` → `aero-safe-rl`), `git init` done.
 3. ✅ **Miniconda installed**, empty conda env `aero-safe-rl` (Python 3.10) created.
-4. **Add `.gitignore`** (`results/`, `build/`, `install/`, `log/`, `*.pt`, `__pycache__/`) and make the first commit.
-5. **Create the directory scaffold**: `configs/ simulation/ ros2_ws/ ai/ rl/ experiments/ scripts/ tests/ results/ docs/`.
-6. **Install Gazebo Harmonic** from the OSRF apt repository alongside Classic 11; verify `gz sim --versions` reports 8.x.
-7. **Install packages into the `aero-safe-rl` conda env**: PyTorch with CUDA, Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas, PyYAML, matplotlib; freeze to `environment.yml`; **verify GPU access**.
-8. **Pin PX4**: create a project branch from the chosen tag (`v1.17.0`) in `~/projects/PX4-Autopilot`, run `Tools/setup/ubuntu.sh`, update submodules, and build `make px4_sitl`.
-9. **Build the bridge**: `Micro-XRCE-DDS-Agent`, plus `px4_msgs` and `px4_ros_com` at commits matching the pinned PX4 tag.
-10. **Write `docs/environment.md` and `scripts/env_report.sh`**, then run the Phase 0 validation checklist.
+4. ✅ **`.gitignore` added** and committed.
+5. ✅ **Directory scaffold created**: `configs/ simulation/ ros2_ws/ ai/ rl/ experiments/ scripts/ tests/ results/ docs/`.
+6. ✅ **Gazebo Harmonic installed** from the OSRF apt repository alongside Classic 11; `gz sim --versions` reports 8.15.0.
+7. ✅ **Packages installed into the `aero-safe-rl` conda env**: PyTorch 2.13+cu126, Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas, PyYAML, matplotlib, TensorBoard; frozen to `environment.yml`; GPU access verified.
+8. ✅ **PX4 pinned**: branch `aero-safe-rl` from tag `v1.17.0`, `make px4_sitl` builds clean.
+9. ✅ **Bridge built**: `Micro-XRCE-DDS-Agent` (installed to `~/.local`, see `docs/environment.md`), `px4_msgs` (`release/1.17`) and `px4_ros_com` (`main`) vendored and colcon-built.
+10. ✅ **`docs/environment.md` and `scripts/env_report.sh` written**, Phase 0 validation checklist passed.
+11. ✅ **Phase 1**: `scripts/sim_start.sh`/`sim_stop.sh` written; RTF measured at 1/2/4/8/16× requested (achieves ~8.3× ceiling, compute-bound); flight stayed stable at every tested factor; 2 concurrent instances confirmed conflict-free. Full numbers in `docs/simulation_notes.md`.
+
+**Next**: Phase 2 — ROS 2 ↔ PX4 integration (`ros2_ws/src/aero_bridge`).
 
 ---
 

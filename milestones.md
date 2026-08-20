@@ -110,24 +110,24 @@ version invalidates them. We pin now so we never have to re-run experiments.
    - Miniconda installed at `~/miniconda3`, initialised for bash
    - Empty conda env `aero-safe-rl` created (Python 3.10.20, no packages yet)
    - Activate with `conda activate aero-safe-rl` before any Python work from here on
-3. **Create the folder structure** (empty folders with `.gitkeep`):
+3. ✅ **Create the folder structure** (empty folders with `.gitkeep`) — done
    `configs/ simulation/ ros2_ws/src/ ai/ rl/ experiments/ scripts/ tests/ results/ docs/`
    (`dashboard/` is not created yet — it is not needed until much later)
-4. **Install Gazebo Harmonic** from the OSRF apt repository.
-   It installs alongside Gazebo Classic 11 and does not remove it.
-5. **Install packages into the `aero-safe-rl` conda env**
+4. ✅ **Install Gazebo Harmonic** from the OSRF apt repository — done, 8.15.0.
+   Installed alongside Gazebo Classic 11; did not remove it.
+5. ✅ **Install packages into the `aero-safe-rl` conda env** — done
    - `conda activate aero-safe-rl`
-   - Install PyTorch with CUDA support (via conda or pip inside the env), then
-     Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas, PyYAML, matplotlib, TensorBoard
-   - Freeze the exact environment into `environment.yml` (`conda env export`)
-6. **Pin PX4**
-   - In `~/projects/PX4-Autopilot`: create branch `aero-safe-rl` from tag `v1.17.0`
-   - Run `Tools/setup/ubuntu.sh`, update submodules, build `make px4_sitl`
-7. **Build the ROS 2 bridge**
-   - Build `Micro-XRCE-DDS-Agent`
-   - Clone `px4_msgs` and `px4_ros_com` into `ros2_ws/src/`, **on branches
-     matching PX4 v1.17.0**, then `colcon build` (from inside the `aero-safe-rl` env)
-8. **Record the environment**
+   - PyTorch 2.13+cu126, Gymnasium, Stable-Baselines3, NumPy, SciPy, pandas,
+     PyYAML, matplotlib, TensorBoard installed; CUDA verified on the RTX 2070
+   - Frozen to `environment.yml` (`conda env export`)
+6. ✅ **Pin PX4** — done
+   - Branch `aero-safe-rl` created from tag `v1.17.0` in `~/projects/PX4-Autopilot`
+   - `Tools/setup/ubuntu.sh` run, submodules updated, `make px4_sitl` builds clean
+7. ✅ **Build the ROS 2 bridge** — done
+   - `Micro-XRCE-DDS-Agent` built (installed to `~/.local`, see `docs/environment.md`)
+   - `px4_msgs` (`release/1.17`) and `px4_ros_com` (`main`) vendored into
+     `ros2_ws/src/`, `colcon build` succeeds — 236 px4_msgs interfaces visible
+8. ✅ **Record the environment** — done
    - `scripts/env_report.sh` prints every version as JSON
    - `docs/environment.md` written from its output
 
@@ -145,14 +145,14 @@ at `~/miniconda3/envs/aero-safe-rl`, so it never needs ignoring.)
 
 ### Done when
 
-- [ ] `scripts/env_report.sh` prints complete version info with no blanks
-- [ ] `conda activate aero-safe-rl && python -c "import torch; print(torch.cuda.is_available())"` → `True`
-- [ ] `nvidia-smi` shows the RTX 2070 and the Python process can use it
-- [ ] `gz sim --versions` reports **8.x** (Harmonic)
-- [ ] `cd ~/projects/PX4-Autopilot && git describe --tags` → **`v1.17.0`**
-- [ ] `make px4_sitl` finishes with no errors
-- [ ] `ros2 interface list | grep px4_msgs` returns messages
-- [ ] Everything committed to git
+- [x] `scripts/env_report.sh` prints complete version info with no blanks
+- [x] `conda activate aero-safe-rl && python -c "import torch; print(torch.cuda.is_available())"` → `True`
+- [x] `nvidia-smi` shows the RTX 2070 and the Python process can use it
+- [x] `gz sim --versions` reports **8.x** (Harmonic) — 8.15.0
+- [x] `cd ~/projects/PX4-Autopilot && git describe --tags` → **`v1.17.0`**
+- [x] `make px4_sitl` finishes with no errors
+- [x] `ros2 interface list | grep px4_msgs` returns messages — 236 interfaces
+- [x] Everything committed to git
 
 ### Watch out for
 
@@ -184,15 +184,19 @@ realistic. We need this number early, not after we have built everything else.
 
 ### Tasks
 
-1. Write `scripts/sim_start.sh` — launches `make px4_sitl gz_x500` headless,
-   with configurable instance number, world, and speed factor
-2. Measure the **real-time factor**: how many simulated seconds pass per real
-   second, at normal speed and with `PX4_SIM_SPEED_FACTOR` set to 2, 4, 8, 16
-3. Find the **highest speed factor where flight stays stable** (the aircraft
-   still hovers cleanly and the EKF does not complain). Write it down.
-4. Confirm two simulator instances run at once without clashing — separate
-   ports, separate model positions, separate `ROS_DOMAIN_ID`
-5. Write `docs/simulation_notes.md` with the measured numbers
+1. ✅ **Write `scripts/sim_start.sh`** — done. Launches PX4 SITL + Gazebo
+   headless directly (env vars matching what the `make ... gz_x500` target
+   does under the hood), with configurable instance number, world, speed
+   factor, spawn pose, and model
+2. ✅ **Measure the real-time factor** — done, at requested 1/2/4/8/16×
+   (sampled from Gazebo's own `/world/<world>/stats` topic, not estimated)
+3. ✅ **Find the highest stable speed factor** — done: ~8× (compute-bound
+   ceiling on this machine; flight itself never became unstable at any
+   tested factor — see `docs/simulation_notes.md`)
+4. ✅ **Confirm two simulator instances run at once without clashing** — done
+   (separate ports, separate model positions; `ROS_DOMAIN_ID` isolation is
+   an M2 concern, not applicable yet since ROS 2 isn't wired in until M2)
+5. ✅ **Write `docs/simulation_notes.md`** — done
 
 ### Files created
 
@@ -204,12 +208,14 @@ docs/simulation_notes.md
 
 ### Done when
 
-- [ ] One command starts a headless simulation; the drone arms, takes off,
+- [x] One command starts a headless simulation; the drone arms, takes off,
       hovers at 5 m, and lands
-- [ ] Real-time factor measured and recorded at each speed factor
-- [ ] Maximum stable speed factor identified and written in `docs/simulation_notes.md`
-- [ ] Two instances run at the same time with no port or messaging conflicts
-- [ ] `scripts/sim_stop.sh` cleanly kills everything (no orphan processes left)
+- [x] Real-time factor measured and recorded at each speed factor
+- [x] Maximum stable speed factor identified and written in `docs/simulation_notes.md`
+      (~8×; this machine is compute-bound there, requesting 16× doesn't exceed it —
+      see `docs/simulation_notes.md` for the full breakdown)
+- [x] Two instances run at the same time with no port or messaging conflicts
+- [x] `scripts/sim_stop.sh` cleanly kills everything (no orphan processes left)
 
 ### Watch out for
 
@@ -775,7 +781,7 @@ Update this as milestones complete.
 | Milestone | Status | Date | Notes |
 |---|---|---|---|
 | M0 | Done | 2026-08-14 | Gazebo Harmonic 8.15.0, PyTorch 2.13+cu126 (CUDA verified), PX4 v1.17.0 SITL builds clean, 236 px4_msgs interfaces visible. See docs/environment.md for full toolchain record and setup deviations. |
-| M1 | Not started | | |
+| M1 | Done | 2026-08-20 | sim_start.sh/sim_stop.sh working (multi-instance, clean orphan cleanup verified). RTF ≈ requested up to 8×; requesting 16× plateaus at ~8.3× (compute-bound, not a stability issue — flight stayed clean and stable at every tested factor). Two concurrent instances confirmed conflict-free. Full numbers in docs/simulation_notes.md. |
 | M2 | Not started | | |
 | M3 | Not started | | |
 | M4 | Not started | | |
