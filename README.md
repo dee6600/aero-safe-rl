@@ -183,6 +183,10 @@ conda activate aero-safe-rl
 # Start a headless PX4 + Gazebo instance
 ./scripts/sim_start.sh -i 0
 ./scripts/sim_stop.sh
+
+# ...or watch it fly: opens the Gazebo GUI, arms, takes off, hovers, lands,
+# and prints a pass/fail checklist
+./scripts/sim_watch.sh
 ```
 
 ## Tech stack

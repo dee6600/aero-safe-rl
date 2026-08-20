@@ -100,3 +100,22 @@ Confirmed during testing: killing only the `px4` process leaves `gz sim`
 running in the background, silently consuming CPU — exactly the failure mode
 `milestones.md` warns about. `scripts/sim_stop.sh` always kills both by name,
 not just tracked PIDs, specifically to guard against this.
+
+**A second, more subtle instance of the same bug was found and fixed**
+(2026-08-20): with the GUI enabled (`--gui`), Gazebo runs as *two* separate
+processes — the physics server (`gz sim --verbose=1 -r -s ...`) and a
+separate GUI client (`gz sim -g`). `sim_stop.sh`'s original sweep pattern
+only matched `--verbose`, so it killed the server but silently orphaned the
+GUI process every time. Fixed by broadening the match to `^gz sim ` (anchored
+to the start of the command line, so it can't accidentally match unrelated
+processes). Confirmed clean on a full watch → verify → stop cycle afterward.
+
+## Watching a flight
+
+`scripts/sim_watch.sh` starts an instance with the Gazebo GUI on, flies an
+arm/takeoff/hover/land sequence via a temporary MAVLink connection, and
+prints a pass/fail checklist (`scripts/fly_demo.py` does the actual flying).
+It targets the machine's real logged-in graphical session (`DISPLAY=:1`)
+explicitly, since a remote/SSH shell has no `DISPLAY` of its own. If that
+session is locked, the Gazebo window still exists and renders — you just
+won't see it until you're at the machine and unlock the screen.

@@ -82,13 +82,16 @@ if [ -z "$INSTANCE" ] || [ "$ALL" -eq 1 ]; then
 	pkill -f "build/px4_sitl_default/bin/px4 -i" 2>/dev/null || true
 	sleep 1
 	pkill -9 -f "build/px4_sitl_default/bin/px4 -i" 2>/dev/null || true
-	pkill -f "gz sim --verbose" 2>/dev/null || true
+	# Matches both the headless server ("gz sim --verbose=1 -r -s ...") and
+	# the GUI client ("gz sim -g") -- a plain "--verbose" match misses the
+	# GUI process and leaves it orphaned. Confirmed by testing.
+	pkill -f "^gz sim " 2>/dev/null || true
 	sleep 1
-	pkill -9 -f "gz sim --verbose" 2>/dev/null || true
+	pkill -9 -f "^gz sim " 2>/dev/null || true
 	rm -f /tmp/px4_lock-*
 fi
 
-REMAINING=$(pgrep -f "build/px4_sitl_default/bin/px4 -i|gz sim --verbose" 2>/dev/null || true)
+REMAINING=$(pgrep -f "build/px4_sitl_default/bin/px4 -i|^gz sim " 2>/dev/null || true)
 if [ -n "$REMAINING" ]; then
 	echo "WARNING: processes still running after cleanup: $REMAINING" >&2
 	exit 1
