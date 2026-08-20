@@ -52,6 +52,18 @@ def sim_worker():
 
 
 @pytest.fixture
+def sim_worker_1():
+    """One headless worker at instance 1, not 0 -- so a test that only cares
+    about telemetry content (not concurrency, which sim_workers_0_1 already
+    covers) still exercises the namespaced topic path instance 0 does not
+    take by default (docs/parallelism.md §2.2), rather than the easy case."""
+    _sim_stop_all()
+    _sim_start(1)
+    yield 1
+    _sim_stop_all()
+
+
+@pytest.fixture
 def sim_workers_0_1():
     """Two concurrent headless workers -- the actual M2 gate. Instance 0 and
     1 deliberately, since PX4 treats instance 0 as a special case internally

@@ -499,8 +499,9 @@ scripts/env_report.sh                                  (patch check + gz binding
 tests/test_px4_interface.py     (no sim — topic-name and command construction)
 tests/test_px4_clock.py         (no sim — fake message stream)
 tests/test_arming_sequence.py   (no sim — fake px4/clock, incl. the reengage fix)
-tests/sim/test_link.py          (@pytest.mark.sim)
-tests/sim/test_sim_clock.py     (@pytest.mark.sim)
+tests/sim/test_link.py               (@pytest.mark.sim)
+tests/sim/test_sim_clock.py          (@pytest.mark.sim)
+tests/sim/test_telemetry_sanity.py   (@pytest.mark.sim)
 ```
 
 - `test_topic_names_follow_namespace` — for instances 0 and 3, every one of the
@@ -521,14 +522,34 @@ tests/sim/test_sim_clock.py     (@pytest.mark.sim)
 - `test_link_alive[instance=0,1]` (sim) — both instances arm, take off, land.
   Parametrised over two instances **running concurrently**; this is the gate,
   and is the one item M2 does not fully close — see `docs/parallelism.md` §2.6.
+- `test_telemetry_values_are_believable` (sim) — flies instance 1 for real and
+  asserts on the numbers, not just presence: altitude climbs near the hover
+  target, the attitude quaternion changes and stays unit-norm, the
+  accelerometer reads real physics, `actuator_motors`/`actuator_outputs` rise
+  from a disarmed baseline once armed, battery `remaining` never rises,
+  `vehicle_status` passes through ARMED, no hardware-failure flag fires, and
+  the estimator reports itself aligned by the end. **This is the test task 2
+  asked for and the milestone originally shipped without** — the "Done when"
+  box below used to point at a no-sim topic-naming test plus an unrecorded
+  manual flight, neither of which actually checks a telemetry value.
 
 ### Done when
 
-All verified 2026-08-20/21 (see `docs/parallelism.md` §2.6 for the one open item):
+All verified 2026-08-20/21, plus the telemetry-values gap closed 2026-08-21
+(see `docs/parallelism.md` §2.6 for the one open item):
 
-- [x] All nine telemetry topics carry believable, changing values — asserted by
-      `tests/test_px4_interface.py` (topic naming/target_system, both instance 0
-      and 3) and flown live on instance 1
+- [x] All nine telemetry topics carry believable, changing values — asserted
+      live by `tests/sim/test_telemetry_sanity.py` (3/3 clean runs against a
+      real worker), not merely by topic-naming tests or an unrecorded manual
+      flight as originally checked off. While calibrating it, one more
+      symptom of the §2.6 DDS transport issue turned up: during a transient
+      `offboard_control_signal_lost`/re-engage, `px4_msgs` message timestamps
+      can jitter backward by a few ms for a couple hundred samples, and once
+      a single message arrived carrying the raw un-synced clock instead of
+      the wall-clock-resynced value. Not re-investigated further — it's
+      consistent with, and doesn't change, §2.6's existing open status — but
+      the test asserts timestamp advancement via head/tail medians rather
+      than strict per-message monotonicity because of it.
 - [x] A Python node flies takeoff → hover → land with no manual steps
 - [x] The same node flies instance 1 with no code change, only a different spec
 - [x] Telemetry latency measured and recorded — instance 1, 978 samples:

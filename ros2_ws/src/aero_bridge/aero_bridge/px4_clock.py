@@ -7,10 +7,18 @@ plain time.sleep(1.0) in mission logic means something different at every
 speed factor, which is exactly the kind of bug that only shows up once
 training moves off 1x.
 
-PX4Clock reads simulated time from the timestamp field PX4 stamps on every
-message it publishes (hrt_absolute_time, which follows the lockstep clock --
-see docs/parallelism.md and CLAUDE.md §4). sleep_sim(seconds) blocks until
-that many seconds of SIMULATED time have passed, not wall time.
+PX4Clock itself is deliberately source-agnostic: sleep_sim(seconds) blocks
+until now_us_fn() reports that many seconds have passed, without caring where
+that value comes from. The obvious source -- the timestamp field PX4 stamps
+on every message it publishes -- turned out to be WRONG: uxrce_dds_client
+resynchronizes every published timestamp to the agent's wall clock before it
+reaches ROS 2, so px4_msgs timestamps track real time almost exactly
+regardless of speed factor (measured ratio 0.991 at requested 4x). Every real
+caller in this project (test_flight.py, and everything built on it from M3
+on) wires now_us_fn to simulation/sim_clock.py's GzSimClock instead, which
+reads Gazebo's own clock directly over gz-transport and gave the correct
+ratio (3.945 at the same speed factor) in the same experiment. Full story:
+GzSimClock's module docstring and docs/parallelism.md §2.5.
 
 The one place wall-clock time is legitimate is the safety deadline: if no
 message ever arrives, sim time never advances and a naive implementation
@@ -18,9 +26,8 @@ would hang forever. That deadline is a hang watchdog, not mission timing, and
 CLAUDE.md §4 carves it out explicitly for exactly that reason.
 
 Deliberately has no rclpy import. now_us_fn and pump_fn are injected by the
-caller (in practice, reading PX4Interface.last_timestamp_us and calling
-rclpy.spin_once) so this class can be unit tested with a fake message stream
-and no ROS runtime at all.
+caller (in practice GzSimClock.now_us and rclpy.spin_once) so this class can
+be unit tested with a fake message stream and no ROS runtime at all.
 """
 
 import time
