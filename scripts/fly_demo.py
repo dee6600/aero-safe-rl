@@ -35,21 +35,29 @@ class Heartbeater(threading.Thread):
         self._stop.set()
 
 
+# PX4's shell client only accepts "--instance N" as argv[1] -- see
+# platforms/posix/src/px4/common/main.cpp:154:
+#     if (argc >= 3 && strcmp(argv[1], "--instance") == 0)
+# Appended anywhere else it is silently ignored, the command goes to instance 0,
+# and it is additionally passed through as a stray argument to the command. That
+# failure is completely silent: the client prints instance 0's reply, so a
+# status check "passes" while the vehicle you meant to command never moves.
+#
+# Always pass it, including for instance 0, so there is one code path (D9).
+def _px4_cmd(binary, instance, *args):
+    return [f"{PX4_BIN_DIR}/{binary}", "--instance", str(instance), *args]
+
+
 def commander(instance, *args):
     import subprocess
-    cmd = [f"{PX4_BIN_DIR}/px4-commander", *args]
-    if instance:
-        cmd += ["--instance", str(instance)]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-    return r
+    return subprocess.run(_px4_cmd("px4-commander", instance, *args),
+                          capture_output=True, text=True, timeout=20)
 
 
 def param_set(instance, name, value):
     import subprocess
-    cmd = [f"{PX4_BIN_DIR}/px4-param", "set", name, str(value)]
-    if instance:
-        cmd += ["--instance", str(instance)]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    subprocess.run(_px4_cmd("px4-param", instance, "set", name, str(value)),
+                   capture_output=True, text=True, timeout=20)
 
 
 def check(label, ok, detail=""):
@@ -65,16 +73,24 @@ def main():
     ap.add_argument("--hover-alt", type=float, default=5.0)
     args = ap.parse_args()
 
-    gcs_port = 14550 + args.instance if args.instance > 9 else 14550
-    # GCS remote port is fixed at 14550 for instance 0; only offsets past
-    # instance 9 (see ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink).
-    if args.instance <= 9:
-        gcs_port = 14550
+    # Use the per-instance "onboard" link, not the GCS broadcast link.
+    # PX4 pushes its GCS stream to a FIXED port 14550 for instances 0-9
+    # (ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink), so two concurrent
+    # instances are indistinguishable there and the second listener cannot even
+    # bind the port. The onboard link does offset per instance:
+    #     udp_offboard_port_remote = 14540 + px4_instance   (instances 0-9)
+    # PX4 sends to it unprompted, so we just listen.
+    if args.instance > 9:
+        raise SystemExit(
+            "instances above 9 share MAVLink port 14549 in PX4 v1.17.0; "
+            "use the ROS 2 path instead"
+        )
+    mav_port = 14540 + args.instance
 
     all_ok = True
 
-    print(f"Connecting as GCS on udp:localhost:{gcs_port} (instance {args.instance})...")
-    conn = mavutil.mavlink_connection(f'udpin:localhost:{gcs_port}')
+    print(f"Connecting on udp:localhost:{mav_port} (instance {args.instance})...")
+    conn = mavutil.mavlink_connection(f'udpin:localhost:{mav_port}')
     hb = conn.wait_heartbeat(timeout=30)
     all_ok &= check("MAVLink heartbeat received from PX4", hb is not None)
     if hb is None:

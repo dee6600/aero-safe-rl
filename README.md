@@ -123,15 +123,15 @@ node could talk to a real PX4 flight controller unchanged.
 
 ## 🚧 Project status
 
-**Currently on M2** (ROS 2 ↔ PX4 integration), with M1b open ahead of it. M0 and
-M1 are complete and verified — see [`milestones.md`](milestones.md) for the full
-task-by-task build log and [`docs/`](docs/) for measured numbers.
+**Currently on M2** (ROS 2 ↔ PX4 integration). M0, M1 and M1b are complete and
+verified — see [`milestones.md`](milestones.md) for the full task-by-task build
+log and [`docs/`](docs/) for measured numbers.
 
 | # | Milestone | Status |
 |---|---|---|
 | M0 | Environment setup and pinning | ✅ Done |
 | M1 | PX4 + Gazebo simulator running | ✅ Done |
-| M1b | Worker isolation, ownership, identity | ⬜ Not started |
+| M1b | Worker isolation, ownership, identity | ✅ Done |
 | M2 | ROS 2 talks to PX4 | 🔨 In progress |
 | M3 | Autonomous mission baseline + episode contract | ⬜ Not started |
 | M4 | **Parallel simulation farm + episode runner** | ⬜ Not started |
@@ -270,7 +270,7 @@ detector that spots a weakening motor PX4 itself never notices.
 | D4 | Evaluation includes an oracle-detector upper bound and a detector-ablation condition |
 | D5 | Simplified pre-training model **deferred** unless full-stack training proves infeasible |
 | D6 | **Gazebo stays primary** for all research milestones; Isaac Sim is an optional, non-blocking learning track |
-| D7 | **One Gazebo server per worker**, isolated by `GZ_PARTITION` — never the shared-world default |
+| D7 | **One drone per world**, `GZ_PARTITION`-isolated; hybrid and shared topologies are benchmarked in M4 but not built; silent unchosen sharing stays prohibited |
 | D8 | **We own the Gazebo server process** so a single worker can be restarted without touching its siblings |
 | D9 | **Uniform instance identity**, no special case for instance 0; derived once and published as a file |
 | D10 | **Sim time is the only clock** in flight logic; wall clock only in the hang watchdog |

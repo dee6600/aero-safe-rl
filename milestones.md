@@ -5,8 +5,9 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0, M1 done. M1 has an addendum (M1b) opened by findings on 2026-08-20.
-M2 in progress. Last revised: 2026-08-20.
+Status: M0 (incl. addendum), M1 and M1b done. M2 in progress — two known
+multi-instance bugs in `px4_interface.py` to fix first, both now provable
+against a live two-worker setup. Last revised: 2026-08-20.
 
 ---
 
@@ -104,7 +105,7 @@ review. These are settled — do not revisit them mid-build.
 | D4 | Evaluation includes **C5** (perfect-detector upper bound) and **C6** (detector ablation) |
 | D5 | Simplified pre-training model **deferred** — revisit only if M4 shows training is impossible |
 | D6 | **Gazebo Harmonic stays primary** for M1–M13; Isaac Sim is an optional, non-blocking learning track |
-| **D7** | **One Gazebo server per SITL instance, isolated by `GZ_PARTITION`.** Never the shared-world default. Rationale and evidence: `docs/parallelism.md` §2.3, §3. |
+| **D7** | **One drone per world — settled for the build (2026-08-20).** Workers are grouped into `GZ_PARTITION`-isolated worlds with `drones_per_world` as a config parameter, **fixed at 1** for M4–M13. The parameter exists so the shared and hybrid topologies can be *measured* in M4's benchmark, not so they can be built: no milestone depends on `drones_per_world > 1`. The original bug was PX4 sharing a world *silently, without anyone choosing it* — that stays prohibited regardless. Rationale and evidence: `docs/parallelism.md` §2.3, §3, §7. |
 | **D8** | **We own the Gazebo server process** (`PX4_GZ_STANDALONE=1`), so a single worker can be stopped and restarted without touching its siblings. |
 | **D9** | **Uniform instance identity, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for all N; `target_system = N+1` always; identity read from `instance_<N>.json`, never recomputed. |
 | **D10** | **Sim time is the only clock in flight logic.** Wall clock is permitted solely in the watchdog. |
@@ -193,12 +194,13 @@ PX4 pinned to `v1.17.0` on branch `aero-safe-rl`; `MicroXRCEAgent` in
 
 ### M0 addendum — two gaps found 2026-08-20 (do before M2)
 
-- [ ] **`pytest` is not installed** in the `aero-safe-rl` env. Every milestone
-      from here on requires unit tests; the runner has to exist first.
-- [ ] **`pyarrow` is not installed.** `planning.md` §3 specifies Parquet episode
-      records; `pandas.to_parquet` fails without it. Decide Parquet vs CSV now
-      (recommend Parquet + a CSV export helper) and install accordingly.
-- [ ] Add both to `environment.yml` and re-export, so the pin stays honest.
+- [x] **`pytest` installed** (9.1.1) — every milestone from here needs unit tests.
+- [x] **`pyarrow` installed** (25.0.1) for the Parquet episode records of
+      `planning.md` §3; `pandas.to_parquet` fails without it.
+- [x] **`pytest-timeout` installed** — a hang is a failure, not a stuck terminal.
+- [x] `environment.yml` re-exported so the pin stays honest.
+- [x] **`pytest.ini` added**, which turned out to be necessary rather than
+      cosmetic — see the ROS plugin note below.
 
 ```bash
 conda activate aero-safe-rl
@@ -218,6 +220,13 @@ conda env export --no-builds > environment.yml
 - ROS 2 is system-wide at `/opt/ros/humble`, not in conda. You need both sourced
   (see `CLAUDE.md` §0). Verified working: conda Python 3.10.20 imports `rclpy`
   from `/opt/ros/humble` with numpy 2.2.6.
+- **ROS 2 Humble's pytest plugins break pytest 8+.** This machine's shells put
+  `/opt/ros/humble` on `PYTHONPATH`, so ROS ships seven `pytest11` entry points
+  into every run. `launch_testing` still declares the `path` hook argument that
+  pytest 8 removed, and aborts collection before a single test runs
+  (`PluginValidationError`). None of them are used here, so `pytest.ini`
+  disables them explicitly with `-p no:...`. **Do not "fix" this by downgrading
+  pytest** — that trades a one-line config for an old test runner.
 
 ---
 
@@ -253,7 +262,7 @@ milestone that already works, is cheap. Fixing it inside M9 is not.
 
 ### Tasks
 
-1. **Rewrite `scripts/sim_start.sh` around the launch sequence in
+1. ✅ **Rewrite `scripts/sim_start.sh` around the launch sequence in
    `docs/parallelism.md` §4.** Specifically:
    1. Derive all eight identity fields from the instance number, in one function.
    2. Export `GZ_PARTITION=aero_<N>` to both the Gazebo server and PX4.
@@ -264,21 +273,21 @@ milestone that already works, is cheap. Fixing it inside M9 is not.
    5. Start `MicroXRCEAgent`; record its PID.
    6. Start `px4 -i N -d` with `PX4_GZ_STANDALONE=1` under `setsid`; record PID.
    7. Export `PX4_UXRCE_DDS_NS=px4_<N>` **for every N including 0**.
-2. **Replace the log-grep readiness check with a real one.** Wait for
+2. ✅ **Replace the log-grep readiness check with a real one.** Wait for
    `/px4_<N>/fmu/out/vehicle_status_v1` on `ROS_DOMAIN_ID=<N>`, with a timeout
    and a non-zero exit on failure. A log line saying the startup script returned
    is not evidence the DDS link is up.
-3. **Write `instance_<N>.json`** into the run directory (default
+3. ✅ **Write `instance_<N>.json`** into the run directory (default
    `/tmp/aero-safe-rl-sim/<run_id>/`), containing `spec_version`, all eight
    identity fields, the three PIDs, world, model, model name, spawn pose, speed
    factor, log paths, and start time.
-4. **Rewrite `scripts/sim_stop.sh -i N`** to kill only the three recorded PIDs
+4. ✅ **Rewrite `scripts/sim_stop.sh -i N`** to kill only the three recorded PIDs
    (by process group), verify they are gone, and remove the instance file. The
    name-based sweep runs only under `--all`, and `--all` refuses to run if any
    instance file it does not own is present unless `--force` is given.
-5. **Add `scripts/sim_status.sh`** printing one line per live instance from the
+5. ✅ **Add `scripts/sim_status.sh`** printing one line per live instance from the
    instance files: instance, PIDs alive/dead, partition, domain, port, RTF.
-6. **Amend `docs/simulation_notes.md`** with the shared-world finding and a
+6. ✅ **Amend `docs/simulation_notes.md`** with the shared-world finding and a
    pointer to `docs/parallelism.md`.
 
 ### Files created / changed
@@ -313,14 +322,24 @@ tests/test_instance_spec.py
 
 ### Done when
 
-- [ ] `sim_start.sh -i 0` and `-i 1` produce **two** `gz sim` server processes
-- [ ] Each instance's RTF is independently settable and honoured
-- [ ] `sim_stop.sh -i 1` leaves instance 0 running and healthy
-- [ ] `sim_stop.sh --all` leaves zero `px4` / `gz sim` / `MicroXRCEAgent`
-- [ ] Instances survive the exit of the shell that launched them
-- [ ] `instance_<N>.json` exists and matches `instance_spec.py`
-- [ ] Readiness check fails (non-zero exit) if the DDS link never comes up —
-      test this by starting PX4 with the agent deliberately not running
+All verified 2026-08-20 (see `docs/simulation_notes.md` for the measured run):
+
+- [x] `sim_start.sh -i 0` and `-i 1` produce **two** `gz sim` server processes
+- [x] Each instance's RTF is independently settable and honoured — worker 0 held
+      exactly 4.00× while worker 1 ran at 8× requested / 5.26× achieved. Under
+      the old shared world the second start would have overridden the first.
+- [x] `sim_stop.sh -i 1` leaves instance 0 running and healthy (still 4.00×)
+- [x] `sim_stop.sh --all` leaves zero `px4` / `gz sim` / `MicroXRCEAgent`
+- [x] Instances survive the exit of the shell that launched them
+- [x] `instance_<N>.json` exists and matches `instance_spec.py`
+- [x] Readiness check fails (non-zero exit) if the DDS link never comes up —
+      exercised by occupying the worker's XRCE port; the launcher detected the
+      dead agent, exited 1, and tore down its own processes leaving no orphans
+- [x] `MAV_SYS_ID = instance + 1` confirmed live: instance 0 reports
+      `system_id: 1`, instance 1 reports `system_id: 2`. This is the value
+      `target_system` must match, and is the M2 bug made visible.
+- [x] Namespace uniformity confirmed live: instance 0 publishes on
+      `/px4_0/fmu/...`, not the bare `/fmu/...` PX4 would default to.
 
 ### Verify with
 
@@ -748,18 +767,74 @@ rather than on the happy path.
    repo, PX4 SHA, config digests, seeds, worker→instance map, versions from
    `env_report.sh`, start/end time, episode counts by outcome, restart counts.
    Written incrementally so a killed run still leaves a readable manifest.
-6. **Throughput measurement — the number M9 is budgeted from.**
-   For N ∈ {1, 2, 3, 4} × speed factor ∈ {1, 2, 4, 8}: aggregate simulated
-   seconds per wall second, episodes per wall hour, per-worker RTF mean and
-   stdev, peak RSS, and failure rate. Record in `docs/throughput.md` with the
-   chosen operating point stated explicitly.
+6. **Make world topology a parameter, not an assumption.**
+   The farm config gains `worlds` and `drones_per_world`; total workers is their
+   product. `drones_per_world = 1` (fully isolated) and `worlds = 1` (fully
+   shared) are the two ends of the same single code path — **not two code
+   paths.** The instance spec gains `world_index` and `slot_index`; the launcher
+   starts one Gazebo server per *world* rather than per *drone*, and drones
+   within a world share its partition, clock and speed factor.
+   Building this as one parameterised design costs almost nothing now. Adding it
+   later means touching the launcher, the spec, the supervisor and the farm at
+   once — the exact rework this milestone exists to prevent.
+7. **Support shared worlds — benchmark only, deferred by default.**
+   `drones_per_world` stays at 1 for the build (D7). Do only what the benchmark
+   arm needs, and stop there. Items 1 and 3–4 below are **deferred unless task 8
+   shows the hybrid winning**; item 2 is the cheap path that makes the arm
+   measurable at all.
+   1. *(Deferred)* **Disable drone–drone collision.** `collide_bitmask` is supported by
+      sdformat14 and the dartsim plugin ships a `BitmaskContactFilter`
+      (verified 2026-08-20). Note the gotcha: masks collide when
+      `maskA & maskB != 0`, so a *shared* drone bitmask still self-collides.
+      Each drone in a world needs a **distinct bit** (`1 << (slot+1)`), with the
+      ground left at `0xFFFF` so every drone still lands on it. That requires
+      per-slot SDF templating at spawn time.
+   2. **Use spatial separation** — spawn slots ≥ 200 m apart, far beyond the
+      20–40 m mission envelope. Simpler and certain, needs no SDF templating,
+      and is enough to make the benchmark arm meaningful. **This is the only
+      collision work to do now.**
+   3. *(Deferred)* Verify PX4 sets each vehicle's EKF origin at its own spawn point, so
+      mission waypoints stay in local coordinates and do not need per-slot
+      offsetting. If they do need offsetting, that is a per-slot special case
+      and must go in the spec, not in mission code.
+   4. *(Deferred)* Confirm the motor model applies no aerodynamic coupling between vehicles
+      (no downwash interaction). If it does, shared worlds are scientifically
+      unusable and the comparison arm is dropped.
+8. **Throughput measurement — the number M9 is budgeted from.**
+   Sweep the **topology grid**, not just worker count:
+
+   | Topology | Workers | Physics threads | What it tests |
+   |---|---|---|---|
+   | 1 world × 1 drone | 1 | 1 | Baseline; matches M1's ~8.3× ceiling |
+   | 4 worlds × 1 drone | 4 | 4 | Full isolation (current default) |
+   | 2 worlds × 2 drones | 4 | 2 | **Hybrid** |
+   | 1 world × 4 drones | 4 | 1 | Full sharing |
+   | 2 worlds × 3 drones | 6 | 2 | Hybrid, RAM-favourable |
+
+   × speed factor ∈ {1, 2, 4, 8}. Record per configuration: **aggregate
+   simulated-seconds per wall-second** (the number that actually matters),
+   episodes per wall hour, per-worker RTF mean and stdev, peak RSS, total CPU
+   utilisation, and failure rate. Write to `docs/throughput.md` with the chosen
+   operating point stated explicitly and the runner-up noted.
+
+   **Expected result, stated in advance so the measurement can falsify it:**
+   isolated worlds should win, because gz-sim steps one world on one thread and
+   M1 already showed a single drone nearly saturates that thread at 8×. Packing
+   a second drone into a world should roughly halve that world's achievable
+   speed factor, leaving aggregate throughput similar but isolation worse. The
+   hybrid's real advantage should be **RAM and process count**, so it matters
+   only if the machine turns out to be memory-bound before it is core-bound.
+   If the data contradicts this, D7's default changes — that is the point of
+   measuring.
+
    **If the best aggregate throughput implies M9 cannot reach 1–3 M steps in
    under ~5 days, stop and revisit decision D5 before building anything else.**
-7. **Soak test.** 4 workers × 100 episodes, unattended, no manual intervention.
-   Zero orphan processes at the end. Memory flat, not growing.
-8. **CPU affinity (only if task 6 shows contention).** Pin each worker's px4 and
-   gz processes to disjoint core sets with `taskset`, leaving cores for the
-   learner. Measure before and after; keep it only if it actually helps.
+9. **Soak test.** 4 workers × 100 episodes at the chosen operating point,
+   unattended, no manual intervention. Zero orphan processes at the end. Memory
+   flat, not growing.
+10. **CPU affinity (only if task 8 shows contention).** Pin each worker's px4 and
+    gz processes to disjoint core sets with `taskset`, leaving cores for the
+    learner. Measure before and after; keep it only if it actually helps.
 
 ### Files created
 
@@ -770,6 +845,7 @@ experiments/sim_farm.py
 experiments/run_manifest.py
 experiments/benchmark_throughput.py
 configs/env/farm.yaml
+configs/env/topologies.yaml        (the benchmark grid)
 docs/throughput.md
 ```
 
@@ -788,6 +864,13 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
   k+base, across processes and runs.
 - `test_no_resource_collision_for_n_workers` — for N up to 8, no two workers
   share a port, domain, partition, namespace or model name.
+- `test_topology_grouping` — for every `(worlds, drones_per_world)` in the
+  benchmark grid, worker count equals the product, each world has exactly
+  `drones_per_world` members, and workers in the same world share a partition
+  while workers in different worlds never do.
+- `test_shared_world_slots_are_separated` — within a world, spawn poses are at
+  least the configured minimum distance apart, and (if the bitmask path is
+  built) every slot has a distinct collision bit while the ground keeps `0xFFFF`.
 - `test_farm_stops_all_on_exception` — an exception inside the context manager
   still stops every worker (use fake supervisors; no simulator).
 - `test_supervisor_restart_marks_episode_invalid` — a simulated process death
@@ -805,13 +888,20 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
 
 ### Done when
 
-- [ ] N workers run concurrently, fully isolated (`pgrep -cf "^gz sim "` == N)
+- [ ] N workers run concurrently in the configured topology
+      (`pgrep -cf "^gz sim "` == number of **worlds**, not workers)
+- [ ] `drones_per_world = 1` and `drones_per_world > 1` run through the **same
+      code path**, selected by config alone
 - [ ] Killing one worker's PX4 mid-episode restarts only that worker; the others
       keep flying and their episodes remain valid
 - [ ] 4 × 100 episodes complete unattended with zero orphan processes
 - [ ] Peak RSS recorded and within budget; no growth across the soak
-- [ ] `docs/throughput.md` states the chosen (N, speed factor) operating point
-      and the aggregate throughput it delivers
+- [ ] `docs/throughput.md` states the chosen **(worlds × drones-per-world,
+      speed factor)** operating point, the aggregate throughput it delivers, and
+      the runner-up
+- [ ] The isolated-vs-hybrid-vs-shared comparison is a measured table, not an
+      argument — including the case where the measurement contradicts the
+      prediction written in task 8
 - [ ] Every episode record carries a valid `termination_reason`; invalid
       episodes are recorded, not dropped
 - [ ] The run manifest reproduces the run's configuration completely
@@ -822,7 +912,8 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
 ```bash
 pytest tests/ -m "not sim and not slow" -q
 pytest tests/sim/ -q
-python experiments/benchmark_throughput.py --workers 1,2,3,4 --speeds 1,2,4,8
+python experiments/benchmark_throughput.py --grid configs/env/topologies.yaml \
+  --speeds 1,2,4,8            # sweeps isolated / hybrid / shared topologies
 pytest tests/slow/test_soak.py -q          # ~1-2 h, run it overnight
 pgrep -cf "^gz sim |px4_sitl_default/bin/px4|MicroXRCEAgent"   # expect 0 after
 ```
@@ -841,6 +932,15 @@ pgrep -cf "^gz sim |px4_sitl_default/bin/px4|MicroXRCEAgent"   # expect 0 after
   readiness timeout generous.
 - **Do not search for free ports or domains.** Two workers starting at once will
   both find the same free port. Assignment is a pure function of worker index.
+- **Shared worlds couple more than they look like they do.** PX4 SITL runs in
+  lockstep (`boards/px4/sitl/sitl.cmake:12`) and takes its entire clock from the
+  world's `/clock` topic (`GZBridge.cpp:345`). Every drone in a world therefore
+  shares one heartbeat — if one flight stack stalls, the whole world waits and
+  every drone in it stalls too. The speed factor is also world-level. Neither
+  shows up in a short test; both show up in a multi-day run.
+- **A shared world is a shared crash domain.** One `gz sim` segfault loses every
+  in-flight episode in that world, not one. That is the cost the hybrid trades
+  against its RAM saving.
 - **The broad `pkill` sweep is forbidden while workers are alive.** Per-worker
   stop uses recorded PIDs only.
 - **Restarts are not uniformly distributed.** High-severity faults crash more,
@@ -859,6 +959,9 @@ Read CLAUDE.md, docs/parallelism.md (all), and milestones.md M4.
 Plan, then implement, M4 tasks 1-3: EpisodeRunner, WorkerSupervisor and SimFarm.
 
 Architecture constraints:
+  - World topology is ONE parameterised design, not two code paths. The farm
+    config has `worlds` and `drones_per_world`; total workers is their product.
+    drones_per_world=1 and worlds=1 are just two points in the same design.
   - EpisodeRunner runs exactly one episode and owns no process lifecycle.
     Everything later (dataset generation, evaluation, the Gym env) calls it.
     There must be exactly one implementation of "fly one episode" in this repo.
@@ -1802,9 +1905,9 @@ Update this as milestones complete.
 
 | Milestone | Status | Date | Notes |
 |---|---|---|---|
-| M0 | Done | 2026-08-14 | Gazebo Harmonic 8.15.0, PyTorch 2.13+cu126 (CUDA verified), PX4 v1.17.0 SITL builds clean, 236 px4_msgs interfaces. Addendum open: `pytest` and `pyarrow` not installed. See `docs/environment.md`. |
+| M0 | Done | 2026-08-14 | Gazebo Harmonic 8.15.0, PyTorch 2.13+cu126 (CUDA verified), PX4 v1.17.0 SITL builds clean, 236 px4_msgs interfaces. See `docs/environment.md`. **Addendum closed 2026-08-20**: pytest 9.1.1, pytest-timeout 2.4.0, pyarrow 25.0.1 installed; `environment.yml` re-exported; `pytest.ini` added to disable ROS's incompatible pytest plugins. |
 | M1 | Done | 2026-08-20 | `sim_start.sh`/`sim_stop.sh` working; RTF ≈ requested up to 8×, plateaus ~8.3× (compute-bound, not a stability limit); two concurrent instances started cleanly. Numbers in `docs/simulation_notes.md`. **Superseded finding:** the "one shared Gazebo process" behaviour it documents is the default but is the wrong architecture — see M1b and `docs/parallelism.md`. |
-| M1b | Not started | | Opened 2026-08-20 by the multi-instance review. Isolation (`GZ_PARTITION`), server ownership (`PX4_GZ_STANDALONE`), uniform identity, instance spec file. |
+| M1b | **Done** | 2026-08-20 | `simulation/instance_spec.py` is now the single source of instance identity (41 unit tests, 0.04 s, no simulator). `sim_start.sh` rewritten: own Gazebo server per worker via `GZ_PARTITION` + `PX4_GZ_STANDALONE`, `setsid` process groups, topic-based readiness, `instance_<N>.json` handshake. `sim_stop.sh` is PID-based per worker; the name-based sweep moved behind `--sweep`. New `sim_status.sh` and `activate.sh`. Verified with two concurrent workers holding independent speed factors, isolated shutdown, and a deliberate failure injection. Also found and fixed a fourth silent multi-instance trap: PX4's shell client only honours `--instance N` as `argv[1]` (`main.cpp:154`), so `px4-param set X 0 --instance 1` silently configures instance 0 and reports success — it had shipped in `fly_demo.py` and briefly in `sim_start.sh`, with the symptom "instance 1 arms but never takes off". Now guarded by a static scan (`tests/test_px4_cli_usage.py`) and `NAV_DLL_ACT` is read back after writing. Added `scripts/watch_worlds.sh`: N isolated worlds, one GUI window each, all drones flown concurrently. |
 | M2 | In progress | | `aero_bridge` package created; `px4_interface.py`, `test_flight.py`, `measure_latency.py` written. **Two silent multi-instance bugs found 2026-08-20** — hardcoded `target_system=1` and hardcoded `/fmu/out/...` topic names. Fix before continuing. |
 | M3 | Not started | | Now also owns the episode record schema and the reset ladder. |
 | M4 | Not started | | **New milestone**: parallel simulation farm + episode runner. Gates M6 and M9. |

@@ -429,10 +429,16 @@ Rough effort estimates assume part-time work; they are for sequencing, not commi
     run-level abort when the restart rate would bias the dataset.
   - Run manifest: run id, repo and PX4 SHAs, config digests, seeds,
     worker→instance map, toolchain versions, outcome and restart counts.
-  - **Measured throughput table** for N ∈ {1,2,3,4} × speed ∈ {1,2,4,8}:
-    aggregate simulated-seconds per wall-second, episodes per hour, per-worker
-    RTF stdev, peak RSS. Written to `docs/throughput.md` with the chosen
-    operating point stated.
+  - **World topology as a parameter, not an assumption** — `worlds` and
+    `drones_per_world` in the farm config, **fixed at 1 drone per world for the
+    build** (D7). Fully isolated and fully shared are two points on one code
+    path, never two code paths; the parameter exists so the benchmark can sweep
+    them, not so later phases can depend on them.
+  - **Measured throughput table** across the topology grid (isolated / hybrid /
+    shared) × speed ∈ {1,2,4,8}: aggregate simulated-seconds per wall-second,
+    episodes per hour, per-worker RTF stdev, peak RSS, CPU utilisation. Written
+    to `docs/throughput.md` with the chosen operating point stated, and with the
+    prediction it was testing recorded in advance so the data can falsify it.
 - **Tech** — Python multiprocessing (`spawn`, never `fork`-after-`rclpy.init`),
   `GZ_PARTITION` isolation, `setsid` process groups, `psutil`.
 - **Validation** — 4 workers × 100 episodes unattended, zero orphan processes,
@@ -717,8 +723,9 @@ support roughly **3–4 workers**, not 32. Mitigations, in order of importance:
 2. **Headless** — no GUI during training, ever.
 3. **Speed factor** — measured single-instance ceiling on this machine is ~8×,
    compute-bound (Phase 1). Note that the speed factor is applied by a
-   **world-level** `set_physics` service call, so it is only per-worker because
-   each worker owns its own world (D7).
+   **world-level** `set_physics` service call, so it is per-worker only to the
+   extent that a worker owns its world — drones sharing a world share one speed
+   factor and one clock (D7).
 4. **3–4 isolated workers** via `SubprocVecEnv` over the Phase 4 farm.
 5. **Short episodes** — terminate early and decisively on crash.
 
@@ -1031,7 +1038,7 @@ budget is reachable.**
 
 | ID | Decision | Resolution |
 |---|---|---|
-| **D7** | Simulator topology for parallel runs | ✅ **One Gazebo server per worker, isolated by `GZ_PARTITION`.** Never the shared-world default. |
+| **D7** | Simulator topology for parallel runs | ✅ **One drone per world**, `GZ_PARTITION`-isolated (settled 2026-08-20). `drones_per_world` exists as a parameter so Phase 4 can *measure* the hybrid and shared topologies; no phase depends on building them. Silent, unchosen sharing stays prohibited. |
 | **D8** | Who owns the Gazebo server process | ✅ **We do** — `PX4_GZ_STANDALONE=1`, server started and PID-tracked by our launcher, so one worker can be restarted without touching its siblings. |
 | **D9** | Instance identity | ✅ **Uniform, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for every N; `target_system = N+1` always; identity computed once in `simulation/instance_spec.py` and published as `instance_<N>.json`. |
 | **D10** | Timing source in flight logic | ✅ **Simulated time only.** Wall clock is permitted solely in the hang watchdog. |

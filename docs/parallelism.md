@@ -45,7 +45,7 @@ by `N`.
 
 ---
 
-## 2. The three traps
+## 2. The four traps
 
 ### 2.1 `target_system` must be `instance + 1`
 
@@ -103,6 +103,38 @@ consequences are all bad for RL:
 - **Vehicles share a space** and can collide, or interact through ground effect
   if spawned close together.
 - **One crash affects everyone**, and a world reset resets all vehicles.
+
+---
+
+### 2.4 `--instance` must be the PX4 shell client's *first* argument
+
+**[source]** `platforms/posix/src/px4/common/main.cpp:154`
+
+```cpp
+if (argc >= 3 && strcmp(argv[1], "--instance") == 0) {
+```
+
+`px4-commander`, `px4-param` and friends only honour `--instance N` when it is
+`argv[1]`. Written anywhere else it is silently ignored: the command goes to
+**instance 0**, and `--instance`/`N` are additionally passed through as stray
+arguments to the sub-command.
+
+```bash
+px4-param set NAV_DLL_ACT 0 --instance 1     # WRONG -- sets it on instance 0
+px4-param --instance 1 set NAV_DLL_ACT 0     # right
+```
+
+**[measured]** With two workers running, `px4-commander arm -f --instance 1`
+incremented instance **0**'s arm count and left instance 1 disarmed. Moving the
+flag first armed instance 1 and left instance 0 alone.
+
+This one is especially nasty because the client prints instance 0's reply, so a
+follow-up `status` check *passes* while the vehicle you meant to command never
+moves. The observed symptom was "instance 1 arms but never takes off", which
+reads as a flight-control problem rather than a CLI problem.
+
+It is a static property of the source, so `tests/test_px4_cli_usage.py` scans
+the repository for call sites and fails if the flag is ever misplaced again.
 
 ---
 
@@ -207,13 +239,44 @@ Single-instance RTF ceiling on this machine is ~8× **[measured, M1]**. With N
 independent worlds the per-worker RTF falls as they contend; aggregate
 throughput, not per-worker RTF, is the number that matters:
 
-> **Required measurement (M4):** aggregate simulated-seconds-per-wall-second for
-> N ∈ {1, 2, 3, 4} at speed factors {1, 2, 4, 8}, plus per-worker RTF stdev.
-> Pick the (N, speed) pair with the best aggregate throughput at acceptable
-> jitter, and budget M9 from that single number.
+> **Required measurement (M4):** aggregate simulated-seconds-per-wall-second
+> across the **topology grid** — isolated (N worlds × 1 drone), hybrid
+> (N/2 worlds × 2 drones), and fully shared (1 world × N drones) — at speed
+> factors {1, 2, 4, 8}, plus per-worker RTF stdev and peak RSS. Pick the
+> configuration with the best aggregate throughput at acceptable jitter, and
+> budget M9 from that single number.
 
 The old assumption "4 workers × 8× = 32× aggregate" is not supported by any
 measurement and should not be planned against.
+
+### Why isolated worlds are the *default*, and why sharing is still worth measuring
+
+**[source]** gz-sim advances one world on a single thread — there is no
+multi-threaded per-model stepping in gz-sim 8. So a world with M vehicles
+computes their physics one after another on one core, and its achievable speed
+factor falls roughly as `1/M`. M1 measured a single drone nearly saturating that
+thread at ~8.3×, which means at high speed factors one world realistically
+carries one drone.
+
+**[source]** The coupling goes further than physics. PX4 SITL is built with
+`ENABLE_LOCKSTEP_SCHEDULER yes` (`boards/px4/sitl/sitl.cmake:12`), and
+`GZBridge::clockCallback` sets PX4's `CLOCK_MONOTONIC` from the world's `/clock`
+topic on every tick (`GZBridge.cpp:331-345`). **Every drone in a world runs off
+that one clock.** A flight stack that stalls therefore stalls its whole world.
+
+Against that, sharing has two genuine advantages worth measuring rather than
+dismissing: **RAM** (one `gz sim` process instead of M) and **process count**
+(fewer things to start, supervise and reap). If this machine turns out to be
+memory-bound before it is core-bound, the hybrid becomes the right answer.
+
+Sharing also requires drone–drone collision to be disabled, which is supported
+here: `collide_bitmask` exists in sdformat14 and the dartsim plugin ships a
+`BitmaskContactFilter` **[measured — symbols present in
+`libgz-physics-dartsim-plugin.so`]**. The gotcha is that masks collide when
+`maskA & maskB != 0`, so a single shared drone mask still self-collides — each
+drone needs a **distinct bit**, with the ground left at `0xFFFF`. Large spatial
+separation (≥ 200 m between spawn slots, against a 20–40 m mission envelope) is
+the simpler alternative and needs no SDF templating.
 
 ---
 
@@ -245,24 +308,32 @@ silently dropping them biases exactly the comparison the paper depends on.
 Before trusting any multi-instance code:
 
 ```bash
-# 1. Two workers, two servers
-scripts/sim_start.sh -i 0 & scripts/sim_start.sh -i 1 &
-pgrep -cf "^gz sim "            # must be 2, not 1
+source scripts/activate.sh
 
-# 2. Independent speed factors
-GZ_PARTITION=aero_0 gz topic -e -t /world/default/stats -n 1 | grep real_time_factor
-GZ_PARTITION=aero_1 gz topic -e -t /world/default/stats -n 1 | grep real_time_factor
+# 1. Two workers, two servers (start them one at a time; readiness is checked)
+scripts/sim_start.sh -i 0 -s 4
+scripts/sim_start.sh -i 1 -s 8
+pgrep -af "^gz sim " | grep -c " -s "      # must be 2, not 1
 
-# 3. Both vehicles reachable, with the same code path
-ROS_DOMAIN_ID=0 ros2 topic echo --once /px4_0/fmu/out/vehicle_status_v1
-ROS_DOMAIN_ID=1 ros2 topic echo --once /px4_1/fmu/out/vehicle_status_v1
+# 2. Everything at a glance, including per-worker RTF
+scripts/sim_status.sh
+
+# 3. Both vehicles reachable, same code path, own domains.
+#    --qos-reliability best_effort is required: PX4 publishes BEST_EFFORT, and a
+#    RELIABLE subscriber waits forever against it with no error.
+ROS_DOMAIN_ID=0 ros2 topic echo --once --qos-reliability best_effort \
+  /px4_0/fmu/out/vehicle_status_v1 | grep system_id     # expect 1
+ROS_DOMAIN_ID=1 ros2 topic echo --once --qos-reliability best_effort \
+  /px4_1/fmu/out/vehicle_status_v1 | grep system_id     # expect 2  (= instance+1)
 
 # 4. Per-worker stop does not disturb the other
-scripts/sim_stop.sh -i 1 && pgrep -cf "^gz sim "    # must be 1
+scripts/sim_stop.sh -i 1
+pgrep -af "^gz sim " | grep -c " -s "      # must be 1
 
 # 5. Full stop is clean
-scripts/sim_stop.sh --all && pgrep -cf "^gz sim |px4_sitl_default/bin/px4|MicroXRCEAgent"
+scripts/sim_stop.sh --all                  # exits 0 and reports "Clean:"
 ```
 
 If step 1 prints `1`, partitions are not being applied and everything downstream
-is running in a shared world.
+is running in a shared world. If step 3 prints the same `system_id` twice, the
+namespace override is not reaching PX4.

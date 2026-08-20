@@ -1,4 +1,4 @@
-# Simulation notes — M1
+# Simulation notes — M1 / M1b
 
 Measured on this machine (RTX 2070 Max-Q, see `docs/environment.md`) on
 2026-08-20, using `scripts/sim_start.sh` / `scripts/sim_stop.sh`, PX4 v1.17.0,
@@ -134,3 +134,76 @@ It targets the machine's real logged-in graphical session (`DISPLAY=:1`)
 explicitly, since a remote/SSH shell has no `DISPLAY` of its own. If that
 session is locked, the Gazebo window still exists and renders — you just
 won't see it until you're at the machine and unlock the screen.
+
+
+---
+
+# M1b — isolated workers (2026-08-20)
+
+Re-measured after `sim_start.sh` was rewritten for one Gazebo server per worker
+(`GZ_PARTITION`, `PX4_GZ_STANDALONE=1`). This supersedes the shared-world
+behaviour described at the top of this file.
+
+## Two concurrent workers, independent worlds
+
+```
+$ scripts/sim_start.sh -i 0 -s 4
+$ scripts/sim_start.sh -i 1 -s 8
+$ pgrep -af "^gz sim " | grep -c " -s "
+2
+$ scripts/sim_status.sh
+INST PARTITION  NS       DOMAIN PORT   SYSID    px4/agent/gz           RTF
+0    aero_0     px4_0    0      8888   1        up/up/up               4.00x
+1    aero_1     px4_1    1      8889   2        up/up/up               5.26x
+```
+
+**Independent speed factors confirmed.** Worker 0 held exactly 4.00× while
+worker 1 ran alongside it. Under the previous shared-world launcher the speed
+factor was a world-level `set_physics` call, so starting worker 1 at 8× would
+have silently changed worker 0 too.
+
+Worker 1 requested 8× and achieved 5.26×. That is expected contention, not a
+fault: two independent physics servers plus two PX4 stacks on 12 threads. The
+single-worker ceiling of ~8.3× measured in M1 still stands. **Quantifying that
+drop-off across worker counts is M4's throughput benchmark**, and the M9 sample
+budget comes from that measurement rather than from extrapolating the
+single-worker number.
+
+## Identity verified live
+
+```
+ROS_DOMAIN_ID=0 ... /px4_0/fmu/out/vehicle_status_v1  ->  system_id: 1
+ROS_DOMAIN_ID=1 ... /px4_1/fmu/out/vehicle_status_v1  ->  system_id: 2
+```
+
+Two things this proves, both previously only read from source:
+
+- **`MAV_SYS_ID = instance + 1`.** This is the value a `VehicleCommand`'s
+  `target_system` must match; a hardcoded `1` is silently dropped on instance 1.
+- **The namespace override works.** Instance 0 publishes on `/px4_0/fmu/...`,
+  not the bare `/fmu/...` that PX4 defaults to for instance 0 only. There is now
+  one topic-naming code path for every worker.
+
+## Isolated shutdown
+
+`sim_stop.sh -i 1` stopped worker 1's three processes by recorded PID and left
+worker 0 running and still at 4.00×. `sim_stop.sh --all` then exited 0 with no
+`px4`, `gz sim` or `MicroXRCEAgent` processes remaining and an empty run
+directory.
+
+## Failure injection
+
+Starting a worker whose uXRCE-DDS agent dies during startup: the launcher
+detected the dead agent within the readiness loop, printed the port it was
+trying to use, exited **1**, tore down the Gazebo server it had already started,
+and left no `instance_2.json` behind. Previously a failure here would have
+reported success and left an orphaned Gazebo server consuming a core.
+
+## Notes
+
+- Workers survive the exit of the shell that launched them (`setsid`), which is
+  what makes them supervisable by a longer-lived process in M4.
+- `results/sim_logs/` now also carries `gz_world_<N>_*.log`, since we own the
+  Gazebo server process and can capture its output.
+- The old `*.pid` files in the run directory are superseded by
+  `instance_<N>.json`, which carries identity and PIDs together.

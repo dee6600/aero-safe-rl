@@ -174,6 +174,12 @@ pytest tests/ -m "not sim and not slow"    # the default; must always pass
 pytest tests/ -m sim                       # milestone gate
 ```
 
+Always invoke it as `python -m pytest` from the repo root, so `pytest.ini` and
+the root `conftest.py` are picked up. `pytest.ini` disables ROS 2 Humble's own
+pytest plugins — `/opt/ros/humble` is on `PYTHONPATH` here, and its
+`launch_testing` plugin is incompatible with pytest 8+ and aborts collection
+before any test runs. Leave those `-p no:...` lines alone.
+
 - **Most logic must be testable without a simulator.** Feature extraction,
   the fault schedule, the recovery FSM, metrics, config loading, and the
   instance-identity mapping all take data in and give data out. Test them
@@ -211,21 +217,24 @@ asserts that written records validate against the schema.
 
 1. Writing a literal `/fmu/out/...` topic string inside a node.
 2. `target_system = 1`.
-3. `time.sleep()` in flight or mission logic.
-4. `while True:` without a deadline.
-5. Searching for a free port or a free ROS domain at runtime.
-6. `pkill -f` anything while other workers are running.
-7. Calling `rclpy.init()` before forking/spawning workers.
-8. A second copy of feature extraction, metrics, or arming logic "just for this
+3. `--instance N` anywhere but immediately after `px4-commander` / `px4-param`.
+   PX4 only reads it as `argv[1]`; elsewhere it is silently ignored and the
+   command hits instance 0 while reporting success.
+4. `time.sleep()` in flight or mission logic.
+5. `while True:` without a deadline.
+6. Searching for a free port or a free ROS domain at runtime.
+7. `pkill -f` anything while other workers are running.
+8. Calling `rclpy.init()` before forking/spawning workers.
+9. A second copy of feature extraction, metrics, or arming logic "just for this
    script".
-9. Splitting a dataset by timestep instead of by episode.
-10. Recomputing normalisation statistics after training has started.
-11. Using ground-truth fault state as a policy input (reward shaping only).
-12. Tuning a baseline down so the learned method wins.
-13. Grepping a log file for a readiness string when a topic or service can be
+10. Splitting a dataset by timestep instead of by episode.
+11. Recomputing normalisation statistics after training has started.
+12. Using ground-truth fault state as a policy input (reward shaping only).
+13. Tuning a baseline down so the learned method wins.
+14. Grepping a log file for a readiness string when a topic or service can be
     queried instead.
-14. Appending results from several workers to one file.
-15. `np.random` global state instead of a seeded `Generator` passed explicitly.
+15. Appending results from several workers to one file.
+16. `np.random` global state instead of a seeded `Generator` passed explicitly.
 
 ---
 
