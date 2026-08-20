@@ -12,6 +12,11 @@ fixed (px4_msgs timestamps are not simulated time, `docs/parallelism.md`
 real, confirmed, unresolved `offboard_control_signal_lost` reliability gap
 (§2.6) at a significant rate (~35-65%), not caused by this project's own
 code; a partial mitigation shipped, full resolution deferred to M4.
+
+**Target pace:** roughly a week of active engineering to build all of
+M3-M13's code. M9's training run and M10's evaluation sweep are separate,
+unattended, wall-clock-bound jobs and are expected to run longer than that in
+the background — see the timeline note at the end of M13.
 Last revised: 2026-08-21.
 
 ---
@@ -109,8 +114,8 @@ review. These are settled — do not revisit them mid-build.
 | D3 | Repo renamed to **`aero-safe-rl`** |
 | D4 | Evaluation includes **C5** (perfect-detector upper bound) and **C6** (detector ablation) |
 | D5 | Simplified pre-training model **deferred** — revisit only if M4 shows training is impossible |
-| D6 | **Gazebo Harmonic stays primary** for M1–M13; Isaac Sim is an optional, non-blocking learning track |
-| **D7** | **One drone per world — settled for the build (2026-08-20).** Workers are grouped into `GZ_PARTITION`-isolated worlds with `drones_per_world` as a config parameter, **fixed at 1** for M4–M13. The parameter exists so the shared and hybrid topologies can be *measured* in M4's benchmark, not so they can be built: no milestone depends on `drones_per_world > 1`. The original bug was PX4 sharing a world *silently, without anyone choosing it* — that stays prohibited regardless. Rationale and evidence: `docs/parallelism.md` §2.3, §3, §7. |
+| D6 | **Gazebo Harmonic stays primary** for M1–M13; Isaac Sim was considered and declined (`planning.md` §14 D6) |
+| **D7** | **One drone per world, always — settled (2026-08-20).** Every worker gets its own `GZ_PARTITION`-isolated Gazebo server. The original bug was PX4 sharing a world *silently, without anyone choosing it*; the fix is simply to never let that happen. Rationale and evidence: `docs/parallelism.md` §2.3, §3, §7. |
 | **D8** | **We own the Gazebo server process** (`PX4_GZ_STANDALONE=1`), so a single worker can be stopped and restarted without touching its siblings. |
 | **D9** | **Uniform instance identity, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for all N; `target_system = N+1` always; identity read from `instance_<N>.json`, never recomputed. |
 | **D10** | **Sim time is the only clock in flight logic**, sourced from **`GzSimClock`** (`simulation/sim_clock.py`, Gazebo's native clock over gz-transport) — **not** `px4_msgs` timestamps, which were measured during M2 to track wall clock almost exactly regardless of speed factor. Wall clock is permitted solely in the watchdog. See `docs/parallelism.md` §2.5. |
@@ -823,74 +828,26 @@ rather than on the happy path.
    repo, PX4 SHA, config digests, seeds, worker→instance map, versions from
    `env_report.sh`, start/end time, episode counts by outcome, restart counts.
    Written incrementally so a killed run still leaves a readable manifest.
-6. **Make world topology a parameter, not an assumption.**
-   The farm config gains `worlds` and `drones_per_world`; total workers is their
-   product. `drones_per_world = 1` (fully isolated) and `worlds = 1` (fully
-   shared) are the two ends of the same single code path — **not two code
-   paths.** The instance spec gains `world_index` and `slot_index`; the launcher
-   starts one Gazebo server per *world* rather than per *drone*, and drones
-   within a world share its partition, clock and speed factor.
-   Building this as one parameterised design costs almost nothing now. Adding it
-   later means touching the launcher, the spec, the supervisor and the farm at
-   once — the exact rework this milestone exists to prevent.
-7. **Support shared worlds — benchmark only, deferred by default.**
-   `drones_per_world` stays at 1 for the build (D7). Do only what the benchmark
-   arm needs, and stop there. Items 1 and 3–4 below are **deferred unless task 8
-   shows the hybrid winning**; item 2 is the cheap path that makes the arm
-   measurable at all.
-   1. *(Deferred)* **Disable drone–drone collision.** `collide_bitmask` is supported by
-      sdformat14 and the dartsim plugin ships a `BitmaskContactFilter`
-      (verified 2026-08-20). Note the gotcha: masks collide when
-      `maskA & maskB != 0`, so a *shared* drone bitmask still self-collides.
-      Each drone in a world needs a **distinct bit** (`1 << (slot+1)`), with the
-      ground left at `0xFFFF` so every drone still lands on it. That requires
-      per-slot SDF templating at spawn time.
-   2. **Use spatial separation** — spawn slots ≥ 200 m apart, far beyond the
-      20–40 m mission envelope. Simpler and certain, needs no SDF templating,
-      and is enough to make the benchmark arm meaningful. **This is the only
-      collision work to do now.**
-   3. *(Deferred)* Verify PX4 sets each vehicle's EKF origin at its own spawn point, so
-      mission waypoints stay in local coordinates and do not need per-slot
-      offsetting. If they do need offsetting, that is a per-slot special case
-      and must go in the spec, not in mission code.
-   4. *(Deferred)* Confirm the motor model applies no aerodynamic coupling between vehicles
-      (no downwash interaction). If it does, shared worlds are scientifically
-      unusable and the comparison arm is dropped.
-8. **Throughput measurement — the number M9 is budgeted from.**
-   Sweep the **topology grid**, not just worker count:
-
-   | Topology | Workers | Physics threads | What it tests |
-   |---|---|---|---|
-   | 1 world × 1 drone | 1 | 1 | Baseline; matches M1's ~8.3× ceiling |
-   | 4 worlds × 1 drone | 4 | 4 | Full isolation (current default) |
-   | 2 worlds × 2 drones | 4 | 2 | **Hybrid** |
-   | 1 world × 4 drones | 4 | 1 | Full sharing |
-   | 2 worlds × 3 drones | 6 | 2 | Hybrid, RAM-favourable |
-
-   × speed factor ∈ {1, 2, 4, 8}. Record per configuration: **aggregate
-   simulated-seconds per wall-second** (the number that actually matters),
-   episodes per wall hour, per-worker RTF mean and stdev, peak RSS, total CPU
-   utilisation, and failure rate. Write to `docs/throughput.md` with the chosen
-   operating point stated explicitly and the runner-up noted.
-
-   **Expected result, stated in advance so the measurement can falsify it:**
-   isolated worlds should win, because gz-sim steps one world on one thread and
-   M1 already showed a single drone nearly saturates that thread at 8×. Packing
-   a second drone into a world should roughly halve that world's achievable
-   speed factor, leaving aggregate throughput similar but isolation worse. The
-   hybrid's real advantage should be **RAM and process count**, so it matters
-   only if the machine turns out to be memory-bound before it is core-bound.
-   If the data contradicts this, D7's default changes — that is the point of
-   measuring.
+6. **Throughput measurement — the number M9 is budgeted from.**
+   One drone per world, always (D7 — settled, not reopened here). Sweep worker
+   count ∈ {1, 2, 3, 4} × speed factor ∈ {1, 2, 4, 8}. Record per configuration:
+   **aggregate simulated-seconds per wall-second** (the number that actually
+   matters), episodes per wall hour, per-worker RTF mean and stdev, peak RSS,
+   total CPU utilisation, and failure rate. Write to `docs/throughput.md` with
+   the chosen operating point stated explicitly.
 
    **If the best aggregate throughput implies M9 cannot reach 1–3 M steps in
    under ~5 days, stop and revisit decision D5 before building anything else.**
-9. **Soak test.** 4 workers × 100 episodes at the chosen operating point,
+   (If it also looks like this machine is memory-, not CPU-, bound, that is the
+   one condition under which sharing a world between drones would be worth
+   reconsidering — but that is a decision to make from real numbers if it ever
+   comes up, not something to pre-build a topology system for now.)
+7. **Soak test.** 4 workers × 100 episodes at the chosen operating point,
    unattended, no manual intervention. Zero orphan processes at the end. Memory
    flat, not growing.
-10. **CPU affinity (only if task 8 shows contention).** Pin each worker's px4 and
-    gz processes to disjoint core sets with `taskset`, leaving cores for the
-    learner. Measure before and after; keep it only if it actually helps.
+8. **CPU affinity (only if task 6 shows contention).** Pin each worker's px4 and
+   gz processes to disjoint core sets with `taskset`, leaving cores for the
+   learner. Measure before and after; keep it only if it actually helps.
 
 ### Files created
 
@@ -901,7 +858,6 @@ experiments/sim_farm.py
 experiments/run_manifest.py
 experiments/benchmark_throughput.py
 configs/env/farm.yaml
-configs/env/topologies.yaml        (the benchmark grid)
 docs/throughput.md
 ```
 
@@ -920,13 +876,6 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
   k+base, across processes and runs.
 - `test_no_resource_collision_for_n_workers` — for N up to 8, no two workers
   share a port, domain, partition, namespace or model name.
-- `test_topology_grouping` — for every `(worlds, drones_per_world)` in the
-  benchmark grid, worker count equals the product, each world has exactly
-  `drones_per_world` members, and workers in the same world share a partition
-  while workers in different worlds never do.
-- `test_shared_world_slots_are_separated` — within a world, spawn poses are at
-  least the configured minimum distance apart, and (if the bitmask path is
-  built) every slot has a distinct collision bit while the ground keeps `0xFFFF`.
 - `test_farm_stops_all_on_exception` — an exception inside the context manager
   still stops every worker (use fake supervisors; no simulator).
 - `test_supervisor_restart_marks_episode_invalid` — a simulated process death
@@ -944,20 +893,14 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
 
 ### Done when
 
-- [ ] N workers run concurrently in the configured topology
-      (`pgrep -cf "^gz sim "` == number of **worlds**, not workers)
-- [ ] `drones_per_world = 1` and `drones_per_world > 1` run through the **same
-      code path**, selected by config alone
+- [ ] N workers run concurrently, fully isolated
+      (`pgrep -cf "^gz sim "` == N)
 - [ ] Killing one worker's PX4 mid-episode restarts only that worker; the others
       keep flying and their episodes remain valid
 - [ ] 4 × 100 episodes complete unattended with zero orphan processes
 - [ ] Peak RSS recorded and within budget; no growth across the soak
-- [ ] `docs/throughput.md` states the chosen **(worlds × drones-per-world,
-      speed factor)** operating point, the aggregate throughput it delivers, and
-      the runner-up
-- [ ] The isolated-vs-hybrid-vs-shared comparison is a measured table, not an
-      argument — including the case where the measurement contradicts the
-      prediction written in task 8
+- [ ] `docs/throughput.md` states the chosen (worker count, speed factor)
+      operating point and the aggregate throughput it delivers
 - [ ] Every episode record carries a valid `termination_reason`; invalid
       episodes are recorded, not dropped
 - [ ] The run manifest reproduces the run's configuration completely
@@ -968,8 +911,7 @@ tests/slow/test_soak.py             (@pytest.mark.slow)
 ```bash
 pytest tests/ -m "not sim and not slow" -q
 pytest tests/sim/ -q
-python experiments/benchmark_throughput.py --grid configs/env/topologies.yaml \
-  --speeds 1,2,4,8            # sweeps isolated / hybrid / shared topologies
+python experiments/benchmark_throughput.py --workers 1,2,3,4 --speeds 1,2,4,8
 pytest tests/slow/test_soak.py -q          # ~1-2 h, run it overnight
 pgrep -cf "^gz sim |px4_sitl_default/bin/px4|MicroXRCEAgent"   # expect 0 after
 ```
@@ -988,15 +930,6 @@ pgrep -cf "^gz sim |px4_sitl_default/bin/px4|MicroXRCEAgent"   # expect 0 after
   readiness timeout generous.
 - **Do not search for free ports or domains.** Two workers starting at once will
   both find the same free port. Assignment is a pure function of worker index.
-- **Shared worlds couple more than they look like they do.** PX4 SITL runs in
-  lockstep (`boards/px4/sitl/sitl.cmake:12`) and takes its entire clock from the
-  world's `/clock` topic (`GZBridge.cpp:345`). Every drone in a world therefore
-  shares one heartbeat — if one flight stack stalls, the whole world waits and
-  every drone in it stalls too. The speed factor is also world-level. Neither
-  shows up in a short test; both show up in a multi-day run.
-- **A shared world is a shared crash domain.** One `gz sim` segfault loses every
-  in-flight episode in that world, not one. That is the cost the hybrid trades
-  against its RAM saving.
 - **The broad `pkill` sweep is forbidden while workers are alive.** Per-worker
   stop uses recorded PIDs only.
 - **Restarts are not uniformly distributed.** High-severity faults crash more,
@@ -1015,9 +948,7 @@ Read CLAUDE.md, docs/parallelism.md (all), and milestones.md M4.
 Plan, then implement, M4 tasks 1-3: EpisodeRunner, WorkerSupervisor and SimFarm.
 
 Architecture constraints:
-  - World topology is ONE parameterised design, not two code paths. The farm
-    config has `worlds` and `drones_per_world`; total workers is their product.
-    drones_per_world=1 and worlds=1 are just two points in the same design.
+  - One drone per world, always (D7 — settled, no topology system to build).
   - EpisodeRunner runs exactly one episode and owns no process lifecycle.
     Everything later (dataset generation, evaluation, the Gym env) calls it.
     There must be exactly one implementation of "fly one episode" in this repo.
@@ -1047,911 +978,249 @@ use pkill; do not drop failed episodes silently.
 ---
 # M5 — Telemetry feature pipeline
 
-*(was M4)*
-
 **Goal:** turn raw telemetry into one fixed-size vector, produced 10 times per
-second, used identically by the detector, the RL policy, and later the dashboard.
+second, used identically by the detector and the RL policy. One implementation,
+imported everywhere — if the detector and the policy compute features
+differently, they drift apart and M10's comparison becomes invalid.
 
-**Why it matters:** if the detector and the policy each compute features their
-own way, they drift apart and the M10 comparison becomes invalid. One
-implementation, used everywhere.
+**Depends on:** M3. **Blocks:** M6, M7, M9.
 
-**Depends on:** M3 (episode records to test against). **Blocks:** M6, M7, M9.
+**Key deliverables:**
+- `FeatureExtractor` — a pure function of a telemetry window (no ROS, no I/O,
+  no global state), so it's testable without a simulator and M7 can iterate on
+  it offline in seconds.
+- The feature set must include the **thrust-vs-achieved-acceleration
+  residual** — a weakening motor forces PX4 to command more thrust while the
+  aircraft accelerates less, likely the single most informative signal here.
+- Normalisation statistics computed once from healthy flights and **frozen to
+  disk** — never recomputed once training starts, or every trained model
+  downstream is silently invalidated.
+- `feature_version` in `configs/features.yaml`, bumped whenever the feature
+  set changes.
 
-### Tasks
-
-1. **`FeatureExtractor`**: sliding window of telemetry (start 1–2 s) → fixed
-   length vector at 10 Hz. Pure function of the window; no ROS, no I/O, no
-   global state. That is what makes it testable without a simulator.
-2. **Feature set, at minimum:**
-   - attitude, angular rates, estimated angular acceleration
-   - position and velocity error against the current setpoint
-   - each motor's normalised output
-   - **commanded thrust vs achieved acceleration (the residual)**
-   - control-allocation residual
-   - EKF innovation values
-   - battery current, vibration metrics
-3. **Handle missing and late messages explicitly.** Topics arrive at different
-   rates and occasionally drop. Decide per feature: hold-last, interpolate, or
-   emit a validity mask — and put the choice in `features.yaml`. Silent
-   zero-filling is how a detector learns to detect dropouts instead of faults.
-4. **Compute normalisation statistics from healthy flights and freeze them** to
-   `ai/features/normalization.json`. Never recompute after training starts.
-5. **`configs/features.yaml`** with an explicit `feature_version` string and the
-   ordered feature-name list. The names are part of the contract — a reordering
-   is a version bump.
-6. **Offline replay path**: extract features from a stored episode record with no
-   simulator. Everything downstream develops against this, which makes M7
-   iteration fast.
-
-### Files created
-
-```
-ai/features/extractor.py
-ai/features/normalization.json         (frozen statistics)
-ai/features/replay.py
-configs/features.yaml
-tests/fixtures/healthy_window.npz      (recorded, committed)
-tests/fixtures/healthy_episode.parquet (recorded, committed)
-```
-
-### Tests (required)
-
-```
-tests/test_features.py
-tests/test_feature_replay.py
-```
-
-- `test_output_length_matches_config` — vector length equals the declared feature
-  list length; a mismatch is caught here, not in training.
-- `test_no_nans_on_healthy_fixture` — the committed healthy window produces a
-  finite vector.
-- `test_deterministic_on_fixture` — same input, same output, bit for bit.
-- `test_window_is_causal` — feeding a window with future samples zeroed changes
-  nothing. **This is the test that catches lookahead leakage**, which is
-  otherwise invisible and inflates every later result.
-- `test_missing_message_handling` — dropping one topic for 200 ms produces the
-  documented behaviour (mask set / hold-last), not silent zeros.
-- `test_normalisation_is_frozen` — the extractor loads stats from disk and does
-  not recompute them.
-- `test_feature_version_in_output` — every emitted record carries the version.
-- `test_thrust_residual_sign` — with commanded thrust above achieved
-  acceleration, the residual has the expected sign. The single most important
-  feature deserves its own test.
-
-### Done when
-
-- [ ] Feature vector logged across a full healthy mission with no gaps, no NaNs
-- [ ] Replaying the same recorded episode produces **exactly** the same vectors
-- [ ] Normalisation statistics computed from healthy data and frozen to disk
-- [ ] `feature_version` recorded in every log file
-- [ ] Causality test passes
-- [ ] Feature extraction runs comfortably inside the 10 Hz budget with margin
-
-### Verify with
-
-```bash
-pytest tests/test_features.py tests/test_feature_replay.py -q
-python -m ai.features.replay results/<run_id>/worker_0/episode_0001.parquet \
-  --check-determinism --repeat 3
-```
-
-### Watch out for
-
-- **The thrust-versus-acceleration residual is probably the most important
-  feature in the project.** A weakening motor forces PX4 to command more thrust
-  while the aircraft accelerates less. Make sure the sign and the units are
-  right, and test it.
-- Never recompute normalisation statistics after training starts. Doing so
-  silently invalidates every trained model.
-- Anything using a *future* value inside the window is a bug — the real drone
-  cannot see the future. Windows look backwards only, and a test enforces it.
-- Feature extraction must not import ROS. Keeping it pure is what lets M7 iterate
-  offline in seconds instead of minutes.
-
-### Claude Code prompt
-
-```
-Read CLAUDE.md and milestones.md M5.
-
-Implement M5 tasks 1, 2 and 6: FeatureExtractor, the feature set, and the
-offline replay path.
-
-Constraints:
-  - FeatureExtractor is a pure function of a telemetry window. No ROS imports,
-    no file I/O at call time, no global state.
-  - Windows are strictly causal.
-  - The ordered feature-name list and feature_version live in
-    configs/features.yaml; the code reads them and never hardcodes an order.
-  - Missing-message policy is explicit per feature and declared in the config.
-
-Deliverables:
-  - ai/features/extractor.py, ai/features/replay.py, configs/features.yaml
-  - tests/test_features.py with the eight tests listed in M5, using a committed
-    fixture in tests/fixtures/ rather than a live simulator
-
-Verify: pytest tests/test_features.py -q
-
-Do not: recompute normalisation statistics at call time; do not use any sample
-later than the window's end; do not zero-fill missing data silently.
-```
+**Non-negotiable:** windows are strictly causal — nothing in the window may use
+a value from after the window's end. This bug (lookahead leakage) is invisible
+and inflates every later result if it slips in.
 
 ---
 
 # M6 — Fault injection and dataset
 
-*(was M5)*
+**Goal:** inject a rotor fault of chosen strength at a chosen moment, repeatably,
+and produce the labelled dataset the detector trains on. The hardest engineering
+milestone — budget accordingly.
 
-**Goal:** inject a rotor fault of any chosen strength, at any chosen moment,
-repeatably — and produce the labelled dataset the detector learns from.
+**Depends on:** M4, M5. **Blocks:** M7.
 
-**Why it matters:** this is the foundation of the research. If faults are not
-controllable and repeatable, nothing after this point is science.
+**Key deliverables:**
+- A Gazebo plugin (`RotorDegradationSystem`, our own repo, never touching the
+  PX4 tree) that scales one rotor's thrust/torque by a live-settable efficiency
+  factor. PX4's `main`-branch `MotorFailureSystem` is a useful structural
+  reference but is binary-only and not in our pinned tag.
+- Build order: binary on/off first (proves the plugin loads and affects
+  flight), then graded severity/ramps/intermittent profiles, then run it under
+  the M4 farm to generate 500-1000 labelled episodes.
+- **Confirm, don't assume** — a gz-transport publish is fire-and-forget, so the
+  plugin must echo the applied efficiency back on a status topic, and the
+  dataset generator must check it. Otherwise it's possible to generate 500
+  "40% fault" episodes in which no fault was ever actually applied.
+- Assert per episode that **PX4's own `FailureDetector` stays silent** at the
+  target severity — if PX4 notices, the fault is outside this project's
+  research question.
 
-**This is the hardest engineering milestone. Budget accordingly.**
-
-**Depends on:** M4 (the farm generates the dataset), M5 (features validate the
-fault is visible). **Blocks:** M7.
-
-### Tasks
-
-1. **Write the Gazebo plugin `RotorDegradationSystem`** (C++, ~250–350 lines).
-   1. Use PX4's `MotorFailureSystem`
-      (`src/modules/simulation/gz_plugins/motor_failure/` on `main`, 344 lines)
-      as a structural reference — it shows the correct pattern.
-   2. Holds one efficiency value per rotor, 0 (dead) to 1 (healthy).
-   3. Listens on a gz-transport topic for updates, so severity can change
-      mid-flight.
-   4. Multiplies that rotor's thrust and torque contribution each physics step.
-   5. Lives in **our** repo, loaded via `GZ_SIM_SYSTEM_PLUGIN_PATH`.
-   6. **The command topic is per-model, not global** —
-      `/model/<model_name>/rotor_efficiency`. With one world per worker this is
-      belt-and-braces, but a global topic would make the plugin unusable the
-      moment two vehicles share a world, and M12's hexacopter work may do exactly
-      that.
-   7. Echo the applied efficiency back on a status topic, so the Python side can
-      *confirm* a fault took effect rather than assuming the message arrived.
-2. **Copy the x500 model into `simulation/models/x500_aero/`** and add our plugin
-   to the SDF. **Do not edit anything inside `~/projects/PX4-Autopilot`.**
-   `GZ_SIM_RESOURCE_PATH` was already wired to find it in M1b.
-3. **Python control interface**: `inject_fault(rotor, severity, profile,
-   onset_time)` with step, ramp and intermittent profiles. Onset time is in
-   **sim** time. Verify application via the status topic from task 1.7.
-4. **Fault configuration files**, severity sampled from a **seeded** generator
-   passed explicitly (never `np.random` global state).
-5. **Ground-truth fault labels written into every episode record**, next to the
-   features, using the M3 schema. The label includes the *commanded* and the
-   *confirmed applied* severity — if they ever differ, the dataset is wrong and
-   we need to know.
-6. **Confirm PX4's `FailureDetector` stays silent** at target severities. Assert
-   it in the dataset generator, per episode, and record the result in the
-   episode summary. If PX4 notices the fault, that episode is outside the
-   research question and must be flagged, not quietly included.
-7. **Generate the dataset**: 500–1000 episodes, healthy and faulty, balanced
-   across severity, onset time and rotor index. Uses the M4 farm. Expect this to
-   take hours — that is what M4 was for.
-
-### Suggested build order
-
-Get the loop closed before making it precise:
-
-- **Step A:** binary failure only (efficiency 0 or 1), one rotor, single
-  instance. Proves the plugin loads, receives messages, and affects flight.
-- **Step B:** graded severity, all rotors, ramps and intermittent profiles.
-- **Step C:** run it under the farm and generate the dataset.
-
-### Files created
-
-```
-simulation/gz_plugins/rotor_degradation/     (C++ source + CMakeLists.txt)
-simulation/models/x500_aero/model.sdf
-simulation/faults/injector.py
-simulation/faults/schedule.py
-configs/faults/rotor_degradation.yaml
-experiments/generate_dataset.py
-docs/fault_injection.md
-```
-
-### Tests (required)
-
-```
-tests/test_fault_schedule.py
-tests/test_fault_config.py
-tests/sim/test_plugin_loads.py        (@pytest.mark.sim)
-tests/sim/test_fault_visible.py       (@pytest.mark.sim)
-tests/slow/test_dataset_balance.py    (@pytest.mark.slow)
-```
-
-- `test_step_profile` / `test_ramp_profile` / `test_intermittent_profile` — the
-  efficiency-vs-sim-time curve is exactly what the config asks for. Pure
-  function, no simulator.
-- `test_severity_sampling_is_seeded` — same seed, same sequence of faults;
-  different seeds, different sequences.
-- `test_onset_time_is_sim_time` — the schedule is unaffected by speed factor.
-- `test_fault_config_validates` — severity in range, rotor index valid, onset
-  before episode end.
-- `test_plugin_loads` (sim) — the plugin appears in the gz server's system list
-  and answers on its status topic.
-- `test_commanded_equals_applied` (sim) — commanded severity is echoed back
-  within tolerance.
-- `test_fault_visible_in_features` (sim) — 40% loss on rotor 2 at t=20 s
-  produces a feature-space deviation exceeding the M3 noise floor by a stated
-  margin.
-- `test_px4_failure_detector_silent` (sim) — at target severities, PX4's own
-  detector does not trigger.
-- `test_dataset_balance` (slow) — the generated corpus is balanced across
-  severity bins, onset times and rotor indices, and label distribution matches
-  the config.
-
-### Done when
-
-- [ ] Plugin loads without errors and responds to its gz topic
-- [ ] Commanded severity is confirmed applied, not assumed
-- [ ] 40% loss on rotor 2 at t = 20 s produces a **clear, repeatable signature**
-      in the M5 features, exceeding the M3 noise floor
-- [ ] Fault timing is in sim time and unaffected by speed factor
-- [ ] Same seed produces the same *fault schedule*; trajectory divergence is
-      within the band measured in M3 task 7 (D11 — not bitwise)
-- [ ] **PX4's own `FailureDetector` stays silent** at target severities, asserted
-      per episode
-- [ ] Dataset of 500+ labelled episodes, balanced across severities
-- [ ] `~/projects/PX4-Autopilot` has **zero** uncommitted modifications
-
-### Verify with
-
-```bash
-pytest tests/test_fault_schedule.py -q
-cmake --build simulation/gz_plugins/rotor_degradation/build
-pytest tests/sim/ -q
-python experiments/generate_dataset.py --config configs/faults/rotor_degradation.yaml \
-  --episodes 500 --workers 4
-pytest tests/slow/test_dataset_balance.py -q
-cd ~/projects/PX4-Autopilot && git status --porcelain   # must be empty
-```
-
-### Watch out for
-
-- **Plugin ordering in the SDF matters.** Ours must be declared *after* the motor
-  model plugin, or the motor model overwrites our changes each step. PX4's plugin
-  README states this explicitly.
-- **Confirm, do not assume.** A gz-transport publish is fire-and-forget. Without
-  the status echo you can generate 500 episodes labelled "40% fault" in which no
-  fault was ever applied, and the detector will learn nothing while looking like
-  it is underfitting.
-- If PX4's `FailureDetector` *does* trigger, the severities are too high. Lower
-  them. The interesting research zone is faults PX4 cannot see.
-- Do not use PX4's `failure motor N off` command for the main experiments. It is
-  binary, and it is internal to PX4, which makes the fault partly
-  self-announcing.
-- Keep every fault parameter in YAML. This dataset will be regenerated more than
-  once and you must be able to say exactly how.
-- Dataset generation is the first long unattended run. If M4's soak test was
-  skipped, this is where you discover it.
-
-### Claude Code prompt (use plan mode for task 1)
-
-```
-Read CLAUDE.md, milestones.md M6, and PX4's
-src/modules/simulation/gz_plugins/motor_failure/ on the main branch as a
-structural reference (read only — do not modify the PX4 tree).
-
-Plan, then implement, M6 task 1 step A: a gz-sim system plugin
-RotorDegradationSystem that applies a per-rotor efficiency factor, starting with
-binary on/off only.
-
-Constraints:
-  - Lives in simulation/gz_plugins/rotor_degradation/ in THIS repo. The PX4 tree
-    is not touched.
-  - Command topic is per-model: /model/<model_name>/rotor_efficiency.
-  - The plugin echoes the applied efficiency on a status topic so Python can
-    confirm application rather than assume it.
-  - The plugin element must appear after the motor model plugin in the SDF.
-
-Deliverables:
-  - simulation/gz_plugins/rotor_degradation/ (source + CMakeLists.txt)
-  - simulation/models/x500_aero/model.sdf (our copy, plugin added)
-  - tests/sim/test_plugin_loads.py asserting the plugin loads and echoes status
-
-Verify: build the plugin, start one instance with GZ_SIM_SYSTEM_PLUGIN_PATH
-pointing at the build output, publish an efficiency of 0 to rotor 2, and show
-from the telemetry that the vehicle's behaviour changed. Then confirm
-`cd ~/projects/PX4-Autopilot && git status --porcelain` is empty.
-
-Do not: use a global gz topic; do not modify the PX4 tree; do not add graded
-severity yet.
-```
+**Non-negotiable:** `~/projects/PX4-Autopilot` must have zero uncommitted
+modifications when this milestone is done.
 
 ---
+
 # M7 — AI fault detector
 
-*(was M6)*
-
-**Goal:** a model that reads the telemetry window and reports whether a fault is
-present, which one, how severe, and how confident it is.
-
-**Why it matters:** this is the first genuinely novel result. Target the region
-where PX4 is blind.
+**Goal:** a model that reads a telemetry window and reports fault presence,
+type, severity, and confidence. The first genuinely novel result.
 
 **Depends on:** M5, M6. **Blocks:** M8, M9.
 
-### Tasks
-
-1. **Split the dataset by episode, never by time step.** Write the splitter so
-   that splitting by timestep is not expressible, and assert the property in a
-   test rather than trusting the caller.
-2. **Train the comparison baselines first** — a threshold on the residual and a
-   random forest on the same features. Doing these first sets the bar honestly
-   and catches dataset problems while the model is still simple enough to debug.
-3. **Train the main model** — start with a **1D CNN or a small GRU**. A
-   Transformer is not justified at this data size.
-4. **Model outputs**: `p(fault)`, fault class, severity estimate, and an
-   **uncertainty measure** — the recovery policy needs to know when to distrust
-   it. Decide the uncertainty mechanism explicitly (ensemble, MC-dropout, or a
-   predicted variance head) and record the choice.
-5. **Wrap it in a ROS 2 node running live at 10 Hz**, sharing `ai/features/` with
-   everything else. The node takes an `InstanceSpec` like every other node.
-6. **Evaluation report**: accuracy per severity, ROC curves, and the **detection
-   delay** distribution.
-7. **Freeze the detector artifact**: checkpoint plus the exact `feature_version`,
-   normalisation file digest and config it was trained under. M9 and M10 must be
-   able to prove which detector produced which result.
-
-### Files created
-
-```
-ai/models/detector.py
-ai/train.py    ai/evaluate.py
-ai/baselines/threshold.py    ai/baselines/random_forest.py
-ai/dataset.py                (split, load, batch)
-ros2_ws/src/aero_bridge/aero_bridge/detector_node.py
-configs/detector/cnn_v1.yaml
-results/detector/report.md
-```
-
-### Tests (required)
-
-```
-tests/test_dataset_split.py
-tests/test_detector_io.py
-tests/test_detector_inference_budget.py
-tests/sim/test_detector_node.py    (@pytest.mark.sim)
-```
-
-- `test_split_is_by_episode` — no episode id appears in more than one split.
-  **The single most important test in this milestone.**
-- `test_split_is_stratified` — severity distribution is preserved across splits.
-- `test_split_is_reproducible` — same seed, same split.
-- `test_no_window_crosses_episode_boundary` — windows are built within an
-  episode, never across two.
-- `test_model_output_shapes` — the four outputs have the declared shapes and
-  ranges (`p(fault)` in [0,1], severity in [0,1]).
-- `test_normalisation_matches_training` — the node refuses to run if the
-  normalisation digest differs from the one the checkpoint was trained with.
-- `test_inference_under_budget` — a single forward pass is < 20 ms on this
-  machine.
-- `test_detector_node_rate` (sim) — the live node sustains 10 Hz.
-
-### Done when
-
-- [ ] Splits are by episode — verified by test, not assumed
-- [ ] Main model beats **both** baselines on held-out episodes
-- [ ] Accuracy reported **per severity level** (a single average hides
-      everything interesting)
-- [ ] Detection delay measured: onset → first sustained alarm (mean, median, p95)
-- [ ] False alarm rate on healthy flights, per minute of flight
-- [ ] Uncertainty output is calibrated well enough to be useful, and its
-      calibration is reported
-- [ ] Live inference under 20 ms per step
-- [ ] Detector artifact frozen with its feature/normalisation digests
-
-### Verify with
-
-```bash
-pytest tests/test_dataset_split.py tests/test_detector_io.py -q
-python ai/train.py --config configs/detector/cnn_v1.yaml --seed 0
-python ai/evaluate.py --checkpoint ai/checkpoints/cnn_v1_seed0.pt --report
-pytest tests/sim/test_detector_node.py -q
-```
-
-### Watch out for
-
-- **Splitting by time step instead of episode leaks data catastrophically.**
-  Overlapping windows from the same flight land in both train and test, accuracy
-  looks superb, and it means nothing. This is the classic mistake in this kind of
-  work, and it is why `test_split_is_by_episode` exists.
-- Report per severity. Strong faults are easy; weak ones are the point.
-- A model that is 99% accurate but takes 4 seconds to notice may be useless in
-  flight. Delay matters as much as accuracy.
-- Class balance: if healthy episodes dominate, accuracy is meaningless. Report
-  precision/recall and use a balanced or weighted objective.
-- The detector must never see ground-truth fault state as an input, at train or
-  test time. Only labels, only in the loss.
+**Key deliverables:**
+- Split the dataset **by episode, never by timestep** — this is the classic
+  data-leakage mistake in this kind of work (overlapping windows from one
+  flight landing in both train and test), and it's worth a dedicated test that
+  makes the wrong split structurally inexpressible, not just discouraged.
+- Baselines (threshold-on-residual, random forest) trained first, so the bar is
+  honest and dataset problems surface while the model is still simple.
+- Main model: a small 1D-CNN or GRU — not a Transformer, not at this data
+  scale.
+- Outputs include an uncertainty estimate, not just a point prediction — the
+  recovery policy needs to know when to distrust the detector.
+- Report accuracy **per severity level**, plus detection-delay distribution. A
+  single averaged accuracy number hides everything that actually matters here.
 
 ---
 
 # M8 — Rule-based recovery baseline
 
-*(was M7)*
+**Goal:** a genuinely well-tuned, non-learning recovery system — what the RL
+policy has to beat. Under-tuning this to make RL look better invalidates the
+whole comparison; reviewers see through it immediately.
 
-**Goal:** a sensible, well-tuned, non-learning recovery system.
+**Depends on:** M7. **Blocks:** M9 (shares its interface), M10.
 
-**Why it matters:** this is what the RL policy must beat. A weak baseline that
-RL then "beats" is worthless, and reviewers see through it immediately. Build
-this one honestly.
-
-**Depends on:** M7. **Blocks:** M9 (shares the policy interface), M10.
-
-### Tasks
-
-1. **Define the shared policy interface first** (`rl/policies/base_policy.py`).
-   Both the FSM and the RL policy implement it. The interface fixes what a policy
-   can see (the detector's estimate, vehicle state, mission context) and what it
-   can command (the M9 action space). Building this first is what makes the C3
-   vs C4 comparison fair — the RL policy must not be able to quietly acquire
-   powers the FSM lacks.
-2. **State machine**: `NORMAL → SUSPECTED → CONFIRMED → RECOVERING →
-   LANDED/ABORTED`.
-3. **Responses**: cap horizontal speed, cap climb rate, lower the altitude
-   ceiling, fly less aggressively, hold position, divert to a safe point, descend
-   under control.
-4. **Hysteresis and debouncing** so a flickering detector does not cause
-   thrashing.
-5. **Tune the thresholds with a documented sweep**, run on the M4 farm. Save the
-   sweep results as evidence.
-6. **Verify behaviour on false alarms** — the FSM must not panic-land a healthy
-   drone.
-
-### Files created
-
-```
-rl/policies/base_policy.py        (shared interface — RL uses this too)
-rl/policies/rule_based.py
-configs/recovery/rule_based.yaml
-experiments/tune_rule_based.py
-results/recovery/tuning_sweep.md
-```
-
-### Tests (required)
-
-```
-tests/test_base_policy_interface.py
-tests/test_rule_based_fsm.py
-```
-
-- `test_fsm_transitions` — every legal transition fires on its condition and no
-  illegal transition is reachable. Table-driven, no simulator.
-- `test_hysteresis_prevents_thrash` — an alternating detector signal at the
-  threshold produces at most one transition per debounce window.
-- `test_false_alarm_does_not_land` — a brief spurious detection on an otherwise
-  healthy flight does not reach `LANDED`.
-- `test_action_within_bounds` — every action the FSM emits is inside the declared
-  action space. **This is what keeps C3 and C4 comparable.**
-- `test_policy_interface_conformance` — the FSM and a stub RL policy both satisfy
-  the same interface, checked by the same test.
-- `test_config_sweep_is_reproducible` — a seeded sweep produces the same grid.
-
-### Done when
-
-- [ ] Clearly beats the no-recovery condition across the severity range
-- [ ] Tuning sweep saved as evidence that it was given a fair chance
-- [ ] Uses the identical command interface the RL policy will use
-- [ ] Behaves sensibly on false alarms
-- [ ] Every FSM parameter lives in YAML, none in code
-
-### Watch out for
-
-- Resist the temptation to under-tune this so RL looks better. A strong baseline
-  makes an RL win *credible*; a weak one makes it worthless.
-- The shared interface is what makes the M10 comparison fair. Build it here, and
-  do not let the RL policy quietly gain extra powers later.
-- Tune against training-fold seeds only. Tuning on the held-out evaluation seeds
-  is the same leakage mistake as splitting by timestep, one level up.
+**Key deliverables:**
+- The shared policy interface (`rl/policies/base_policy.py`) comes **first** —
+  both the FSM and the eventual RL policy implement it, so M10's comparison
+  can't be skewed by the RL policy quietly having powers the FSM lacks.
+- A `NORMAL → SUSPECTED → CONFIRMED → RECOVERING → LANDED/ABORTED` state
+  machine with hysteresis (a flickering detector must not cause mode thrash),
+  and thresholds tuned via a documented, archived sweep.
+- Verified not to panic-land a healthy drone on a brief false alarm.
 
 ---
 
 # M9 — RL recovery policy
 
-*(was M8)*
+**Goal:** train a high-level policy that takes the detector's estimate and
+decides how to keep the mission alive. The core contribution, and the
+milestone most likely to consume time — which is why the design stays small
+and why M4 exists first.
 
-**Goal:** train a policy that takes the detector's estimate and chooses
-high-level actions that keep the mission alive.
+**Depends on:** M4 (throughput budget), M7, M8. **Blocks:** M10.
 
-**Why it matters:** the core contribution, and the milestone most likely to
-consume time — which is why the design is deliberately small and why M4 exists.
+**Do not start until `docs/throughput.md` says the sample budget is reachable.**
 
-**Depends on:** M4 (throughput), M7 (detector), M8 (interface). **Blocks:** M10.
+**Key deliverables:**
+- Observation, action and reward frozen as versioned YAML **before training
+  starts** — changing these mid-project silently invalidates every earlier run.
+- The Gym environment is a thin wrapper over M4's `EpisodeRunner`; it must not
+  re-implement flying, reset, or logging.
+- PPO, ≥3 seeds (one run proves nothing), domain randomisation over fault
+  severity/timing/mass/wind/noise, reward components logged separately so
+  reward hacking is visible rather than indistinguishable from learning.
 
-**Do not start this milestone until `docs/throughput.md` says the sample budget
-is reachable.**
-
-### Tasks
-
-1. **Freeze the observation, action and reward specification before training
-   starts.** Write them to `configs/rl/observation_v1.yaml`,
-   `action_v1.yaml`, `reward_v1.yaml` with version strings, and add a test that
-   the environment's spaces match the files. Full specification in
-   `planning.md` §7.2. Changing these mid-project silently invalidates every
-   earlier run; the version string is what makes that visible.
-2. **Build the Gymnasium environment** wrapping the stack at **5 Hz**. It is a
-   thin wrapper over M4's `EpisodeRunner` — it must not re-implement flying,
-   reset, or logging.
-3. **Environment contract tests before any training.**
-   `gymnasium.utils.env_checker`, plus a random-action smoke test of 1000 steps
-   across a worker restart.
-4. **Wire the farm into `SubprocVecEnv`.** Start method `spawn`, explicitly.
-   `rclpy.init()` only inside workers. Worker→instance assignment from M4.
-5. **Train with PPO.** Domain randomisation over fault severity, timing, mass,
-   wind and sensor noise. Randomisation ranges live in config and are recorded
-   in the run manifest.
-6. **Train at least 3 seeds.** A single run proves nothing.
-7. **Log to TensorBoard, checkpoint often**, and make training resumable — a
-   multi-day run will be interrupted.
-8. **Watch for reward hacking explicitly.** Log the components of the reward
-   separately, not just the total. A policy that maximises reward by exploiting a
-   shaping term looks identical to a policy that learned the task, unless you can
-   see the breakdown.
-
-### Files created
-
-```
-rl/envs/uav_fault_env.py
-rl/rewards/mission_reward.py
-rl/policies/rl_policy.py
-rl/train.py    rl/evaluate.py
-configs/rl/ppo_v1.yaml
-configs/rl/observation_v1.yaml  action_v1.yaml  reward_v1.yaml
-configs/env/train_env.yaml
-```
-
-### Key design points (repeated because they are easy to lose)
-
-- The policy sees the **detector's estimate**, never the true fault state. True
-  state may shape the reward during training, but must never be an input.
-  Violating this destroys hardware transferability and any claim about RQ3.
-- Actions are high-level only: speed limits, altitude offset, mission pacing, and
-  a decision to commit to landing. **Never motor commands.**
-- Give **partial credit for a safe landing**. Without it, the policy learns to
-  gamble on completing the mission instead of protecting the aircraft.
-- Rough target: **1–3 M environment steps**. Budget from `docs/throughput.md`,
-  not from an assumption.
-
-### Tests (required)
-
-```
-tests/test_obs_action_spec.py
-tests/test_reward_function.py
-tests/test_env_contract.py
-tests/sim/test_env_smoke.py        (@pytest.mark.sim)
-tests/slow/test_vecenv_4.py        (@pytest.mark.slow)
-```
-
-- `test_spaces_match_config` — observation and action spaces equal the frozen
-  YAML, dimension for dimension and bound for bound.
-- `test_observation_excludes_ground_truth` — no ground-truth fault field can
-  reach the observation vector. **This test protects the entire research claim.**
-- `test_reward_components_sum` — the logged components sum to the total.
-- `test_reward_safe_landing_beats_crash` — for matched trajectories, a controlled
-  landing scores strictly above a crash.
-- `test_reward_is_bounded` — no input produces an unbounded or NaN reward.
-- `test_env_checker` — passes `gymnasium.utils.env_checker` with a stub backend,
-  no simulator.
-- `test_env_smoke_random_actions` (sim) — 1000 random-action steps without hang
-  or crash, including at least one induced worker restart.
-- `test_vecenv_4_workers` (slow) — 4 parallel envs step together for 10 k steps;
-  no cross-talk, no leaks, no orphans.
-
-### Done when
-
-- [ ] Observation, action and reward specs frozen and version-stamped **before**
-      the first training run
-- [ ] Environment passes the contract tests and the random-action smoke test
-      across a worker restart
-- [ ] Training runs stably for 3+ seeds
-- [ ] Learning curves show real improvement, not noise
-- [ ] Reward components logged separately and inspected for hacking
-- [ ] Policy beats the M8 rule-based baseline on mission success and crash rate
-      with **non-overlapping confidence intervals** across seeds — or the null
-      result is documented with evidence
-- [ ] Checkpoints, configs, seeds and the run manifest saved together
-
-### Watch out for
-
-- **If training is too slow, fix it by shortening episodes and ending failed ones
-  early — not by raising the decision rate.** The 5 Hz rate is what makes the
-  problem small enough to learn.
-- If PPO plateaus, **check the reward first.** Reward bugs look exactly like
-  learning failures. Only after a genuine tuning effort should SAC be considered,
-  and then it is reported as an extra comparison, not a silent swap.
-- **A result showing RL only ties the rule-based baseline is a legitimate finding
-  — report it.** Tuning endlessly until RL wins is how projects lose their
-  integrity, and reviewers usually notice.
-- Watch RAM. Four workers plus a learner on 16 GB is tight; M4 measured the
-  actual number, use it.
-- A worker that dies mid-rollout must not corrupt the batch. Decide explicitly
-  whether the partial episode is discarded or truncated with bootstrapping, and
-  make it consistent.
-- Never call `rclpy.init()` in the learner process.
-
-### Claude Code prompt (use plan mode)
-
-```
-Read CLAUDE.md, planning.md §7, docs/throughput.md, and milestones.md M9.
-
-Plan, then implement, M9 tasks 1-3: freeze the observation/action/reward specs
-as versioned YAML, build the Gymnasium environment as a thin wrapper over
-experiments/episode_runner.py, and write the contract tests.
-
-Constraints:
-  - The env must NOT re-implement flying, reset, or logging. It calls
-    EpisodeRunner.
-  - Ground-truth fault state must be structurally unable to reach the
-    observation. Write the test that proves this.
-  - Spaces are read from the YAML; a test asserts they match.
-  - Every episode has both a sim-time limit and a wall-clock watchdog, and
-    returns truncated=True with a termination_reason rather than hanging.
-
-Deliverables:
-  - rl/envs/uav_fault_env.py, configs/rl/{observation,action,reward}_v1.yaml
-  - tests/test_obs_action_spec.py, tests/test_reward_function.py,
-    tests/test_env_contract.py (all no-sim, using a stub backend)
-
-Verify: pytest tests/ -m "not sim and not slow" -q, then
-pytest tests/sim/test_env_smoke.py -q
-
-Do not: start training in this session; do not call rclpy.init() outside a
-worker; do not put ground-truth fault state anywhere near the observation.
-```
+**Non-negotiable — protects the entire research claim:** the policy sees the
+**detector's estimate**, never the true fault state. Ground truth may shape the
+training reward, but must never reach the observation. Actions are high-level
+only (speed/altitude/pacing/land-commit) — never a motor command. A policy that
+only ties the rule-based baseline is a legitimate, reportable finding; tuning
+until it wins is how projects lose their integrity.
 
 ---
+
 # M10 — Full experiments and results
 
-*(was M9)*
-
-**Goal:** run the complete comparison and produce the paper's figures and tables.
+**Goal:** run the complete comparison and produce the paper's figures and
+tables.
 
 **Depends on:** M7, M8, M9. **Blocks:** M11, M13.
 
-### Tasks
+**The condition matrix:**
 
-1. **Batch runner for the full matrix**, on the M4 farm:
+| | Condition | Fault | Detection | Recovery |
+|---|---|---|---|---|
+| C1 | Healthy | No | — | — |
+| C2 | Faulty, no recovery | Yes | — | PX4 default only |
+| C3 | Detection + rules | Yes | AI | State machine |
+| C4 | Detection + RL | Yes | AI | RL policy |
+| C5 | Perfect detection + RL | Yes | True state | RL policy |
+| C6 | RL, detector disabled | Yes | None | RL policy |
 
-   | | Condition | Fault | Detection | Recovery |
-   |---|---|---|---|---|
-   | C1 | Healthy | No | — | — |
-   | C2 | Faulty, no recovery | Yes | — | PX4 default only |
-   | C3 | Detection + rules | Yes | AI | State machine |
-   | C4 | Detection + RL | Yes | AI | RL policy |
-   | C5 | **Perfect detection + RL** | Yes | True state | RL policy |
-   | C6 | **RL, detector disabled** | Yes | None | RL policy |
+**Key deliverables:**
+- Severity sweep 0.2-1.0, ≥100 episodes/cell on held-out seeds never used in
+  training; `experiments/metrics.py` is the one place any metric is computed.
+- Confidence intervals across **seeds**, never pooled across episodes within a
+  seed — that understates uncertainty and is the most common statistical error
+  in RL papers.
+- All figures generated by script, never hand-edited; the runner must resume a
+  partial run without re-running or double-counting finished cells.
 
-2. **Severity sweep**: 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0.
-3. **100+ episodes per cell**, using held-out seeds never seen in training.
-   The held-out seed set is generated once, committed, and never regenerated.
-4. **`experiments/metrics.py` is the one place a metric is computed.** Detector,
-   FSM and RL conditions are never measured by different code.
-5. **Statistics**: means, 95% confidence intervals, significance tests, effect
-   sizes. Report CIs across *seeds*, not across episodes within a seed — the
-   episodes within one training seed are not independent samples of "the method".
-6. **The RQ3 study**: artificially inject delay and false alarms into the
-   detector output, and measure how recovery degrades.
-7. **All figures generated by script** — never hand-edited.
-8. **Resumability.** The full matrix is many hours of simulation. The runner must
-   be able to resume from a partially complete results directory without
-   re-running finished cells, and without double-counting.
-
-### Files created
-
-```
-experiments/run_matrix.py
-experiments/metrics.py          (the ONE place metrics are computed)
-experiments/analysis/figures.py
-experiments/analysis/stats.py
-configs/experiments/main_comparison.yaml
-configs/experiments/heldout_seeds.json    (generated once, committed)
-results/main/                             (raw logs + generated figures)
-```
-
-### Tests (required)
-
-```
-tests/test_metrics.py
-tests/test_matrix_runner.py
-tests/test_stats.py
-```
-
-- `test_metrics_on_known_episode` — a hand-constructed episode with a known
-  answer produces exactly that answer for every metric. Golden-file style.
-- `test_metrics_handle_invalid_episodes` — episodes marked `valid=false` are
-  excluded from headline metrics and counted separately.
-- `test_success_definition_is_single_sourced` — "mission success" is defined
-  once and used by every condition.
-- `test_matrix_resume_skips_done_cells` — resuming a partial run does not re-run
-  or double-count.
-- `test_matrix_cell_isolation` — each cell's results land in its own directory
-  and no cell writes into another's.
-- `test_ci_across_seeds_not_episodes` — the CI helper refuses to be handed raw
-  episodes without a seed grouping.
-- `test_figures_regenerate_deterministically` — running the figure script twice
-  produces identical output.
-
-### Done when
-
-- [ ] All six conditions run across all severities
-- [ ] Every figure and table regenerates from raw logs with **one command**
-- [ ] Confidence intervals reported everywhere — no bare averages
-- [ ] The detection-delay study (RQ3) complete
-- [ ] Re-running with the same seeds reproduces the numbers within the M3 task 7
-      divergence band
-- [ ] Invalid/restarted episodes accounted for explicitly in every table
-
-### Watch out for
-
-- **C5 versus C4 is the most informative comparison in the paper**: it separates
-  "our detector is imperfect" from "our policy is imperfect". Reviewers always
-  ask; we will already have the answer.
-- All conditions must use identical PX4 parameters. Any difference is a
-  confound that invalidates the comparison.
-- Excluded episodes are a result, not a nuisance. If C4 has a higher restart
-  rate than C3, that is information about the method, and hiding it is
-  misconduct.
-- Do not compute CIs over pooled episodes from all seeds — it understates
-  uncertainty dramatically and is the most common statistical error in RL papers.
+**Why C5/C6 matter:** C5 vs C4 separates "the detector is imperfect" from "the
+policy is imperfect" — the question every reviewer asks first. Excluded/invalid
+episodes are a result to report, not a nuisance to hide — if C4 restarts more
+than C3, that's information about the method.
 
 ---
 
 # M11 — Generalization tests
 
-*(was M10)*
-
-**Goal:** find out where the approach works and where it breaks. **No retraining
-— evaluation configs only.**
+**Goal:** find out where the approach works and where it breaks. No
+retraining — evaluation configs only.
 
 **Depends on:** M10.
 
-### Axes
+**Axes:** unseen severities (interpolation and extrapolation), unseen onset
+timings, unseen wind, perturbed mass/inertia/battery, unseen missions, and the
+hardest case — multiple simultaneous faults or a fault type never trained on.
+Each axis's distance from the training distribution should be checked against
+the M9 randomisation ranges, not eyeballed.
 
-Unseen severities (interpolation *and* extrapolation beyond the training range),
-unseen fault onset timings, unseen wind profiles, perturbed mass / inertia /
-battery, unseen missions and initial conditions, and the hardest case — multiple
-simultaneous faults or a fault type never trained on.
-
-### Tests (required)
-
-```
-tests/test_generalization_configs.py
-```
-
-- `test_heldout_axes_disjoint_from_training` — every generalization config uses
-  parameter values outside the training distribution, checked automatically
-  against the M9 randomisation ranges. Doing this by eye is how "held-out" sets
-  quietly stop being held out.
-- `test_no_retraining_in_eval_path` — the evaluation entry point cannot load an
-  optimiser or take a gradient step.
-
-### Done when
-
-- [ ] Generalization table complete across all axes
-- [ ] Failure modes described honestly, in plain terms
-- [ ] Each axis's distance from the training distribution stated quantitatively
-
-**Watch out for:** the instinct to hide poor generalization. A clear statement of
-*where the method stops working* is worth more to reviewers than a table of
+**Watch out for:** the instinct to hide poor generalization. A clear statement
+of where the method stops working is worth more to reviewers than a table of
 uniform success, which mostly reads as untested.
 
 ---
 
 # M12 — Hexacopter extension
 
-*(was M11)*
-
-**Goal:** test whether the method transfers to an aircraft with spare rotors.
-
-**Important:** PX4 has **no Gazebo hexacopter model** — only a simplified-physics
-one and a JSBSim one. We build the model and airframe ourselves. This is real
-work, not a configuration flag.
+**Goal:** test whether the method transfers to a platform with spare rotors.
 
 **Depends on:** M10.
 
-### Tasks
+PX4 has no Gazebo hexacopter model — only a simplified-physics one and a
+JSBSim one — so the model and airframe file are built from scratch here; this
+is real work, not a config flag. The fault plugin (already per-model,
+per-rotor) should need no changes.
 
-1. Build a hexacopter SDF model, including our degradation plugin (which is
-   already per-model and per-rotor, so it should need no changes — verify that).
-2. Create the PX4 airframe file with correct six-rotor mixing, in
-   `simulation/airframes/`, loaded without modifying the PX4 tree.
-3. Extend `instance_spec.py` and the feature config for six rotors — the feature
-   vector length changes, so this is a `feature_version` bump, not an edit.
-4. Retrain or fine-tune the detector for six rotors.
-5. Evaluate the policy zero-shot, then after fine-tuning.
-
-### Tests (required)
-
-```
-tests/test_hex_airframe_config.py
-tests/test_feature_version_bump.py
-```
-
-- `test_rotor_count_drives_feature_length` — the feature vector length follows
-  the airframe's rotor count from config, with no hardcoded 4.
-- `test_quad_checkpoint_rejected_on_hex` — loading a quad-trained detector
-  against hex features fails loudly rather than silently misaligning columns.
-
-### Done when
-
-- [ ] Hexacopter flies the baseline mission when healthy
-- [ ] The full fault → detect → recover loop works on it
-- [ ] Feature version bumped; quad and hex artifacts cannot be confused
-
-**Scientific note:** a hexacopter has spare rotors, so PX4 alone already handles
-losing one far better than a quadcopter does. Our method's advantage should
-*shrink*. Measuring that shrinking margin is a genuinely good result — report it
-as a finding, not a disappointment.
+**Scientific note:** a hexacopter is over-actuated, so PX4 alone already
+handles losing one rotor far better than a quadcopter does — our method's
+advantage should *shrink*. Measuring that shrinking margin is a genuinely good
+result, not a disappointment.
 
 ---
 
 # M13 — Paper and reproducibility package
 
-*(was M12)*
-
 **Goal:** a submittable paper and a package someone else can actually run.
 
-**Depends on:** M10 (M11 and M12 strengthen it but do not gate it).
+**Depends on:** M10 (M11/M12 strengthen it but don't gate it).
 
-### Tasks
+**Key deliverables:** the manuscript around RQ1-RQ4; `docs/reproduce.md` with
+complete from-clean-machine instructions (including how to pick a worker count
+on different hardware); a one-command reproduction script for the headline
+result; archived models/configs/seeds/results/manifests; a tagged release.
 
-1. Write the manuscript around RQ1–RQ4.
-2. `docs/reproduce.md` — complete instructions from a clean machine, including
-   the parallelism setup, since a reader with a different core count needs to
-   know how to pick N.
-3. One-command reproduction script for the headline result.
-4. Archive trained models, configs, seeds, raw results and run manifests.
-5. Tag a release; record a short demo video (the dashboard's replay mode is the
-   easiest way to produce this).
-
-### Done when
-
-- [ ] A clean machine reproduces the headline result following `docs/reproduce.md`
-      alone
-- [ ] Every number in the paper traces back to a file in `results/`
-- [ ] Every result's run manifest identifies the exact code and config that
-      produced it
-- [ ] Repository tagged and archived
+**Done when:** a clean machine reproduces the headline result following
+`docs/reproduce.md` alone, and every number in the paper traces back to a file
+in `results/`.
 
 ---
 
-## Parallel track — Web dashboard
+*(M5-M13 above are intentionally stubs — goal, key deliverables, and the
+non-negotiables worth remembering, not a full task/test/prompt breakdown. That
+detail gets written when each milestone actually starts, informed by whatever
+M3/M4 and everything since have actually taught us by then. Writing exhaustive
+specs this far ahead is the kind of premature detail this project is actively
+trying to avoid — see CLAUDE.md and the note at the top of this file. M0-M4
+above stay fully detailed because they're done or in progress, and that detail
+is the real, load-bearing build record and verification instructions, not
+speculation.)*
 
-Can start any time after **M5**. Not required for any research result, so it must
-never delay M6–M10.
-
-FastAPI backend with a ROS 2 node → WebSocket → React frontend. Shows position,
-attitude, velocity, battery, per-motor health, detected fault and severity,
-recovery state, mission progress, and telemetry plots.
-
-Build the **replay mode** (playing back a saved episode record) before the live
-mode — it is more useful for paper figures and the demo video, it does not
-require a running simulator to develop against, and it exercises the episode
-schema, which is a useful check on M3.
-
-No database, no login, no containers. The backend imports `ai/features/`; it does
-not reimplement it.
+*(Timeline, clarified 2026-08-21: the target is roughly a week of active
+**engineering** to build all of M3-M13's code — no scope was cut for this.
+M9's training run and M10's evaluation sweep are separate, unattended,
+wall-clock-bound jobs (hours to multiple days, per the throughput this project
+already measured) — they run in the background for as long as the compute
+actually needs, are not part of the week of engineering, and don't block
+writing M11/M12/M13's code while they run. M13's actual paper *content* is the
+one thing that is genuinely sequenced after M9/M10 finish producing real
+numbers, since it can't be written before the results it describes exist.)*
 
 ---
 
-## Parallel track — Isaac Sim (learning, optional)
+## Deferred, out of scope for now
 
-Can start any time — no dependency on any other milestone, and it must never
-delay M6–M10. See `planning.md` §10b and §14 (D6) for the full reasoning.
-
-Stack: Isaac Sim (pip install, its own conda env, kept separate from
-`aero-safe-rl`) + Pegasus Simulator's PX4 MAVLink backend, driving the same
-pinned PX4 `v1.17.0` binary. Goal: get the x500 quad flying the M3 baseline
-mission in Isaac Sim, single instance. Stretch goal: port the rotor degradation
-fault via an `omni.physx` physics-step callback instead of a compiled plugin —
-plausibly *simpler* than the Gazebo version.
-
-This machine's RTX 2070 (8 GB) is under Isaac Sim's stated minimum spec. Expect
-real performance ceilings and treat them as expected, not as a problem to solve.
-This track exists for learning, not for a number that ends up in the paper.
+A web dashboard was considered as an optional parallel track (not required by
+any research result). Cut to keep the project's surface area small — revisit
+only if actually wanted, and design it then. Isaac Sim was considered and
+declined entirely (`planning.md` §14 D6) — Gazebo is the only simulator in
+this plan.
 
 ---
 

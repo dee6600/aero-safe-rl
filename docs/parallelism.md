@@ -409,43 +409,30 @@ independent worlds the per-worker RTF falls as they contend; aggregate
 throughput, not per-worker RTF, is the number that matters:
 
 > **Required measurement (M4):** aggregate simulated-seconds-per-wall-second
-> across the **topology grid** — isolated (N worlds × 1 drone), hybrid
-> (N/2 worlds × 2 drones), and fully shared (1 world × N drones) — at speed
-> factors {1, 2, 4, 8}, plus per-worker RTF stdev and peak RSS. Pick the
-> configuration with the best aggregate throughput at acceptable jitter, and
-> budget M9 from that single number.
+> for worker count ∈ {1, 2, 3, 4} at speed factors {1, 2, 4, 8}, plus
+> per-worker RTF stdev. Pick the configuration with the best aggregate
+> throughput at acceptable jitter, and budget M9 from that single number.
 
 The old assumption "4 workers × 8× = 32× aggregate" is not supported by any
 measurement and should not be planned against.
 
-### Why isolated worlds are the *default*, and why sharing is still worth measuring
+### Why one drone per world (D7)
 
 **[source]** gz-sim advances one world on a single thread — there is no
 multi-threaded per-model stepping in gz-sim 8. So a world with M vehicles
 computes their physics one after another on one core, and its achievable speed
 factor falls roughly as `1/M`. M1 measured a single drone nearly saturating that
 thread at ~8.3×, which means at high speed factors one world realistically
-carries one drone.
+carries one drone — packing more in would only divide the same throughput
+across more vehicles, not add any.
 
 **[source]** The coupling goes further than physics. PX4 SITL is built with
 `ENABLE_LOCKSTEP_SCHEDULER yes` (`boards/px4/sitl/sitl.cmake:12`), and
 `GZBridge::clockCallback` sets PX4's `CLOCK_MONOTONIC` from the world's `/clock`
 topic on every tick (`GZBridge.cpp:331-345`). **Every drone in a world runs off
-that one clock.** A flight stack that stalls therefore stalls its whole world.
-
-Against that, sharing has two genuine advantages worth measuring rather than
-dismissing: **RAM** (one `gz sim` process instead of M) and **process count**
-(fewer things to start, supervise and reap). If this machine turns out to be
-memory-bound before it is core-bound, the hybrid becomes the right answer.
-
-Sharing also requires drone–drone collision to be disabled, which is supported
-here: `collide_bitmask` exists in sdformat14 and the dartsim plugin ships a
-`BitmaskContactFilter` **[measured — symbols present in
-`libgz-physics-dartsim-plugin.so`]**. The gotcha is that masks collide when
-`maskA & maskB != 0`, so a single shared drone mask still self-collides — each
-drone needs a **distinct bit**, with the ground left at `0xFFFF`. Large spatial
-separation (≥ 200 m between spawn slots, against a 20–40 m mission envelope) is
-the simpler alternative and needs no SDF templating.
+that one clock**, so a flight stack that stalls stalls its whole world, and a
+`gz sim` crash loses every vehicle in that world, not one. One drone per world
+avoids both.
 
 ---
 

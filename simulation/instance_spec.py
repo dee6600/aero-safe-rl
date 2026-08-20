@@ -85,7 +85,6 @@ class InstanceSpec:
         cls,
         instance: int,
         *,
-        world_index: int | None = None,
         world: str = DEFAULT_WORLD,
         model: str = DEFAULT_MODEL,
         speed_factor: float = 1.0,
@@ -94,11 +93,8 @@ class InstanceSpec:
     ) -> "InstanceSpec":
         """Derive a worker's full identity from its instance number.
 
-        ``world_index`` defaults to ``instance``, i.e. one drone per world
-        (decision D7). M4's throughput benchmark is the only thing that will
-        pass a different value, to group several drones into one world; keeping
-        the Gazebo partition keyed off ``world_index`` rather than ``instance``
-        means that change is a different argument here, not a redesign.
+        One drone per Gazebo world, always (decision D7) -- so ``world_index``
+        is simply ``instance``, not a separate configurable concept.
 
         ``spawn_pose`` defaults to the world origin. Because each worker owns
         its own world, every worker can spawn at the same place — which removes
@@ -118,9 +114,7 @@ class InstanceSpec:
         if speed_factor <= 0:
             raise InstanceSpecError(f"speed_factor must be > 0, got {speed_factor}")
 
-        world_index = instance if world_index is None else world_index
-        if world_index < 0:
-            raise InstanceSpecError(f"world_index must be >= 0, got {world_index}")
+        world_index = instance
 
         pose = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if spawn_pose is None else spawn_pose
         if len(pose) != 6:
@@ -270,7 +264,6 @@ def _main() -> int:
         description="Emit one worker's identity as JSON, for shell consumption."
     )
     ap.add_argument("-i", "--instance", type=int, required=True)
-    ap.add_argument("--world-index", type=int, default=None)
     ap.add_argument("-w", "--world", default=DEFAULT_WORLD)
     ap.add_argument("-m", "--model", default=DEFAULT_MODEL)
     ap.add_argument("-s", "--speed", type=float, default=1.0)
@@ -296,7 +289,6 @@ def _main() -> int:
     try:
         spec = InstanceSpec.for_instance(
             args.instance,
-            world_index=args.world_index,
             world=args.world,
             model=args.model,
             speed_factor=args.speed,

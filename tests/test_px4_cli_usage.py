@@ -33,7 +33,10 @@ SEARCH_DIRS = ("scripts", "simulation", "experiments", "ros2_ws/src/aero_bridge"
 
 SEARCH_SUFFIXES = (".py", ".sh")
 
-PX4_CLIENTS = ("px4-commander", "px4-param")
+PX4_CLIENTS = ("px4-param",)
+# px4-commander had the same argv[1] trap, but its only call site was
+# scripts/fly_demo.py (removed -- superseded by the ROS 2 flight path). If a
+# px4-commander call is ever added back, add it here so it's covered again.
 
 #: Sub-commands that must never appear before --instance.
 SUBCOMMANDS = (

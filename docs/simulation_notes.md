@@ -127,13 +127,19 @@ processes). Confirmed clean on a full watch → verify → stop cycle afterward.
 
 ## Watching a flight
 
-`scripts/sim_watch.sh` starts an instance with the Gazebo GUI on, flies an
-arm/takeoff/hover/land sequence via a temporary MAVLink connection, and
-prints a pass/fail checklist (`scripts/fly_demo.py` does the actual flying).
-It targets the machine's real logged-in graphical session (`DISPLAY=:1`)
-explicitly, since a remote/SSH shell has no `DISPLAY` of its own. If that
-session is locked, the Gazebo window still exists and renders — you just
-won't see it until you're at the machine and unlock the screen.
+`scripts/watch_worlds.sh` starts N isolated workers with the Gazebo GUI on,
+flies each one over ROS 2 (`aero_bridge.test_flight` — the same code path
+the project actually flies with, no separate demo implementation), and
+prints a pass/fail summary per worker. It targets the machine's real
+logged-in graphical session (`DISPLAY=:1`) explicitly, since a remote/SSH
+shell has no `DISPLAY` of its own. If that session is locked, the Gazebo
+window still exists and renders — you just won't see it until you're at the
+machine and unlock the screen.
+
+(M1's original visual check flew over a temporary MAVLink connection,
+before the ROS 2 bridge existed. Removed once `watch_worlds.sh` could do the
+same job over the project's actual flight path instead of a second,
+parallel one.)
 
 
 ---

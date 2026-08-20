@@ -11,6 +11,17 @@
 # Deliberately does nothing else. If a script needs more environment than this,
 # that environment belongs in the script.
 
+# Conda's, ROS's, and colcon's own setup scripts all reference unset
+# variables internally (e.g. ROS's AMENT_TRACE_SETUP_FILES, colcon's
+# COLCON_TRACE) -- harmless normally, but fatal if the calling shell has
+# `set -u` active (several scripts in this project do). Save/restore rather
+# than assuming the caller's setting, so this file is safe to source from
+# anywhere, and every one of these third-party sources is covered -- not
+# just the first one a caller happened to hit.
+_AERO_NOUNSET=0
+case "$-" in *u*) _AERO_NOUNSET=1 ;; esac
+set +u
+
 # shellcheck disable=SC1091
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate aero-safe-rl
@@ -26,6 +37,9 @@ if [ -f "$_AERO_WS" ]; then
 	source "$_AERO_WS"
 fi
 unset _AERO_WS
+
+[ "$_AERO_NOUNSET" = 1 ] && set -u
+unset _AERO_NOUNSET
 
 # simulation/instance_spec.py is a plain (non-ROS) package at the repo root,
 # imported by every aero_bridge node (M2 on) as the single source of instance

@@ -158,22 +158,11 @@ def test_bad_topic_direction_rejected():
 # ------------------------------------------------------------------ topology
 
 
-def test_partition_follows_world_not_instance():
-    """One drone per world today (D7), but the partition keys off world_index.
-
-    M4's benchmark groups several drones into one world by passing world_index;
-    keeping the partition keyed here means that is a different argument, not a
-    redesign.
-    """
+def test_one_drone_per_world():
+    """D7: every instance gets its own Gazebo partition -- no shared worlds."""
     assert InstanceSpec.for_instance(0).gz_partition == "aero_0"
     assert InstanceSpec.for_instance(1).gz_partition == "aero_1"
-
-    shared = [InstanceSpec.for_instance(i, world_index=0) for i in (0, 1)]
-    assert shared[0].gz_partition == shared[1].gz_partition == "aero_0"
-    # ...but they must still be distinct workers in every other respect.
-    assert shared[0].xrce_port != shared[1].xrce_port
-    assert shared[0].topic_ns != shared[1].topic_ns
-    assert shared[0].mav_sys_id != shared[1].mav_sys_id
+    assert InstanceSpec.for_instance(0).gz_partition != InstanceSpec.for_instance(1).gz_partition
 
 
 def test_default_spawn_pose_is_origin():

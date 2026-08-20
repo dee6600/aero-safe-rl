@@ -204,7 +204,8 @@ def land_and_wait(node, px4: PX4Interface, clock: PX4Clock, *,
     VEHICLE_CMD_NAV_LAND is accepted, PX4's own AUTO_LAND mode takes over and
     no longer needs offboard setpoints, so -- unlike arm_and_engage_offboard
     and hold_position_until -- this does not stream anything, matching the
-    original hand-verified behaviour from M1's sim_watch.sh checks.
+    original hand-verified M1 behaviour (a manual MAVLink check, before the
+    ROS 2 bridge existed).
     """
     wall_deadline = time.monotonic() + timeout_s
     next_command = time.monotonic()

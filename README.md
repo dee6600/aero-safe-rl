@@ -123,16 +123,19 @@ node could talk to a real PX4 flight controller unchanged.
 
 ## 🚧 Project status
 
-**Currently on M2** (ROS 2 ↔ PX4 integration). M0, M1 and M1b are complete and
-verified — see [`milestones.md`](milestones.md) for the full task-by-task build
-log and [`docs/`](docs/) for measured numbers.
+**M0–M2 done.** M2 has one open item — a real, confirmed, currently
+unresolved DDS transport reliability gap under concurrent worker load, not
+caused by this project's own code (full writeup:
+[`docs/parallelism.md`](docs/parallelism.md) §2.6). M3 (autonomous mission
+baseline) is next. See [`milestones.md`](milestones.md) for the full
+task-by-task build log and [`docs/`](docs/) for measured numbers.
 
 | # | Milestone | Status |
 |---|---|---|
 | M0 | Environment setup and pinning | ✅ Done |
 | M1 | PX4 + Gazebo simulator running | ✅ Done |
 | M1b | Worker isolation, ownership, identity | ✅ Done |
-| M2 | ROS 2 talks to PX4 | 🔨 In progress |
+| M2 | ROS 2 talks to PX4 | ✅ Done (one open reliability item, §2.6) |
 | M3 | Autonomous mission baseline + episode contract | ⬜ Not started |
 | M4 | **Parallel simulation farm + episode runner** | ⬜ Not started |
 | M5 | Telemetry feature pipeline | ⬜ Not started |
@@ -167,13 +170,17 @@ log and [`docs/`](docs/) for measured numbers.
   at **~8× real-time**; flight stayed stable and clean at every tested speed
   factor up to a 16× request. Full breakdown:
   [`docs/simulation_notes.md`](docs/simulation_notes.md).
-- **Multi-instance simulation started conflict-free** — two concurrent PX4
-  instances came up with independent ports and spawn positions. ⚠️ **Since
-  revised:** they shared *one* Gazebo world, which is PX4's default but the wrong
-  topology for parallel RL — shared clock, world-level speed factor, shared crash
-  domain. M1b reworks the launcher for one isolated Gazebo server per worker
-  (`GZ_PARTITION`). Evidence and the corrected design:
+- **Multi-instance simulation isolated correctly** — each worker owns its own
+  Gazebo server (`GZ_PARTITION`), independent speed factor, independent
+  shutdown. PX4's default (one shared world) was tried first and found wrong
+  for parallel RL; the corrected design and evidence are in
   [`docs/parallelism.md`](docs/parallelism.md).
+- **ROS 2 flies PX4 on any instance number** — the two multi-instance bugs
+  that made this fail silently on instance ≥ 1 are fixed and covered by
+  tests. Latency measured (mean 7.2 ms). One open item: a DDS transport
+  reliability gap under concurrent worker load — confirmed not caused by
+  this project's own publish timing (instrumented and verified), root cause
+  not fully isolated. `docs/parallelism.md` §2.6.
 
 </details>
 
@@ -197,9 +204,9 @@ conda activate aero-safe-rl
 ./scripts/sim_start.sh -i 0
 ./scripts/sim_stop.sh
 
-# ...or watch it fly: opens the Gazebo GUI, arms, takes off, hovers, lands,
-# and prints a pass/fail checklist
-./scripts/sim_watch.sh
+# ...or watch it fly over ROS 2: opens the Gazebo GUI, arms, takes off,
+# hovers, lands, and prints a pass/fail summary
+./scripts/watch_worlds.sh -n 1
 ```
 
 ## Tech stack
@@ -207,7 +214,7 @@ conda activate aero-safe-rl
 | Layer | Choice |
 |---|---|
 | Flight stack | [PX4 Autopilot](https://px4.io/) `v1.17.0`, stock, never patched |
-| Simulator | [Gazebo Harmonic](https://gazebosim.org/) 8 (+ an optional [Isaac Sim](docs/isaac_sim.md) learning track) |
+| Simulator | [Gazebo Harmonic](https://gazebosim.org/) 8 |
 | Middleware | ROS 2 Humble, `px4_msgs` / `px4_ros_com` over uXRCE-DDS |
 | ML | PyTorch, Gymnasium, Stable-Baselines3 (PPO) |
 | Environment | conda (`aero-safe-rl` env), pinned via `environment.yml` |
@@ -269,8 +276,8 @@ detector that spots a weakening motor PX4 itself never notices.
 | D3 | Repo named **`aero-safe-rl`** |
 | D4 | Evaluation includes an oracle-detector upper bound and a detector-ablation condition |
 | D5 | Simplified pre-training model **deferred** unless full-stack training proves infeasible |
-| D6 | **Gazebo stays primary** for all research milestones; Isaac Sim is an optional, non-blocking learning track |
-| D7 | **One drone per world**, `GZ_PARTITION`-isolated; hybrid and shared topologies are benchmarked in M4 but not built; silent unchosen sharing stays prohibited |
+| D6 | **Gazebo stays primary** for all research milestones; Isaac Sim was considered and declined |
+| D7 | **One drone per world**, `GZ_PARTITION`-isolated; silent, unchosen sharing stays prohibited |
 | D8 | **We own the Gazebo server process** so a single worker can be restarted without touching its siblings |
 | D9 | **Uniform instance identity**, no special case for instance 0; derived once and published as a file |
 | D10 | **Sim time is the only clock** in flight logic, from `GzSimClock` (Gazebo's own clock) — not `px4_msgs` timestamps, which track wall clock regardless of speed factor; wall clock only in the hang watchdog |

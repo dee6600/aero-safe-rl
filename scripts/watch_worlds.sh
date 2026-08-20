@@ -78,15 +78,16 @@ if [ "$FLY" -eq 1 ]; then
 	echo
 	echo "=== flying all $WORKERS drones at once (arm / takeoff / hover / land) ==="
 	# shellcheck disable=SC1091
-	source "$HOME/miniconda3/etc/profile.d/conda.sh"
-	conda activate aero-safe-rl
+	source "$REPO_DIR/scripts/activate.sh"
 
-	# Each worker talks over its own MAVLink port (14540+instance), so these are
-	# genuinely independent flights rather than one flight seen N times.
+	# Each worker uses its own ROS_DOMAIN_ID (= instance number, set by
+	# test_flight.py itself), so these are genuinely independent flights, all
+	# over ROS 2 -- the same path this project actually flies with, not a
+	# separate MAVLink demo path.
 	pids=()
 	for i in $(seq 0 $LAST); do
-		python "$REPO_DIR/scripts/fly_demo.py" --instance "$i" --speed "$SPEED" \
-			>"/tmp/fly_demo_$i.log" 2>&1 &
+		python3 -m aero_bridge.test_flight --instance "$i" --hover-alt 5.0 \
+			>"/tmp/aero_flight_$i.log" 2>&1 &
 		pids+=($!)
 	done
 
@@ -94,7 +95,7 @@ if [ "$FLY" -eq 1 ]; then
 	for idx in "${!pids[@]}"; do
 		wait "${pids[$idx]}" || rc=1
 		echo "--- worker $idx ---"
-		sed 's/^/    /' "/tmp/fly_demo_$idx.log"
+		sed 's/^/    /' "/tmp/aero_flight_$idx.log"
 	done
 
 	echo
