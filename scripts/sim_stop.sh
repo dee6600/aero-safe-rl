@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Cleanly stop PX4 SITL + Gazebo instances started by sim_start.sh.
+# Cleanly stop PX4 SITL + Gazebo + MicroXRCEAgent instances started by
+# sim_start.sh.
 #
-# Orphaned `px4` and `gz sim` processes are a known failure mode with this
-# stack (a plain SIGTERM to px4 does not cascade to the Gazebo server it
-# spawned) -- this script always cleans up both, and always sweeps for
+# Orphaned `px4`, `gz sim`, and `MicroXRCEAgent` processes are a known
+# failure mode with this stack (a plain SIGTERM to px4 does not cascade to
+# the Gazebo server it spawned, and the agent is a separate process
+# entirely) -- this script always cleans up all three, and always sweeps for
 # leftovers by process name in addition to the tracked PIDs, so a crashed or
 # manually-started instance doesn't linger and quietly eat CPU.
 set -uo pipefail
@@ -46,14 +48,14 @@ done
 
 PID_DIR="/tmp/aero-safe-rl-sim"
 
-stop_instance() {
-	local inst="$1"
-	local pid_file="$PID_DIR/px4_instance_${inst}.pid"
+stop_pid_file() {
+	local pid_file="$1"
+	local label="$2"
 	if [ -f "$pid_file" ]; then
 		local pid
 		pid="$(cat "$pid_file")"
 		if kill -0 "$pid" 2>/dev/null; then
-			echo "Stopping instance $inst (pid $pid)"
+			echo "Stopping $label (pid $pid)"
 			kill "$pid" 2>/dev/null || true
 			for _ in $(seq 1 10); do
 				kill -0 "$pid" 2>/dev/null || break
@@ -63,6 +65,12 @@ stop_instance() {
 		fi
 		rm -f "$pid_file"
 	fi
+}
+
+stop_instance() {
+	local inst="$1"
+	stop_pid_file "$PID_DIR/px4_instance_${inst}.pid" "instance $inst"
+	stop_pid_file "$PID_DIR/xrce_agent_${inst}.pid" "MicroXRCEAgent for instance $inst"
 	rm -f "/tmp/px4_lock-${inst}"
 }
 
@@ -78,7 +86,7 @@ else
 fi
 
 if [ -z "$INSTANCE" ] || [ "$ALL" -eq 1 ]; then
-	echo "Sweeping for leftover px4/gz sim processes..."
+	echo "Sweeping for leftover px4/gz sim/MicroXRCEAgent processes..."
 	pkill -f "build/px4_sitl_default/bin/px4 -i" 2>/dev/null || true
 	sleep 1
 	pkill -9 -f "build/px4_sitl_default/bin/px4 -i" 2>/dev/null || true
@@ -88,10 +96,13 @@ if [ -z "$INSTANCE" ] || [ "$ALL" -eq 1 ]; then
 	pkill -f "^gz sim " 2>/dev/null || true
 	sleep 1
 	pkill -9 -f "^gz sim " 2>/dev/null || true
+	pkill -f "MicroXRCEAgent" 2>/dev/null || true
+	sleep 1
+	pkill -9 -f "MicroXRCEAgent" 2>/dev/null || true
 	rm -f /tmp/px4_lock-*
 fi
 
-REMAINING=$(pgrep -f "build/px4_sitl_default/bin/px4 -i|^gz sim " 2>/dev/null || true)
+REMAINING=$(pgrep -f "build/px4_sitl_default/bin/px4 -i|^gz sim |MicroXRCEAgent" 2>/dev/null || true)
 if [ -n "$REMAINING" ]; then
 	echo "WARNING: processes still running after cleanup: $REMAINING" >&2
 	exit 1

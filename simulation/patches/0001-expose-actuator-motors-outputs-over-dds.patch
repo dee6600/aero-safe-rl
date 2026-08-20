@@ -1,0 +1,19 @@
+diff --git a/src/modules/uxrce_dds_client/dds_topics.yaml b/src/modules/uxrce_dds_client/dds_topics.yaml
+index 7cc39d199c..6dd7544bd9 100644
+--- a/src/modules/uxrce_dds_client/dds_topics.yaml
++++ b/src/modules/uxrce_dds_client/dds_topics.yaml
+@@ -16,6 +16,14 @@ publications:
+     type: px4_msgs::msg::ModeCompleted
+     rate_limit: 50.
+ 
++  - topic: /fmu/out/actuator_motors
++    type: px4_msgs::msg::ActuatorMotors
++    rate_limit: 50.
++
++  - topic: /fmu/out/actuator_outputs
++    type: px4_msgs::msg::ActuatorOutputs
++    rate_limit: 50.
++
+   - topic: /fmu/out/battery_status
+     type: px4_msgs::msg::BatteryStatus
+     rate_limit: 1.

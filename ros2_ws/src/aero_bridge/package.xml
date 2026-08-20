@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aero_bridge</name>
+  <version>0.1.0</version>
+  <description>PX4 &lt;-&gt; ROS 2 telemetry and command bridge for aero-safe-rl</description>
+  <maintainer email="durgeshreddiyar@gmail.com">dee6600</maintainer>
+  <license>TBD</license>
+
+  <depend>rclpy</depend>
+  <depend>px4_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

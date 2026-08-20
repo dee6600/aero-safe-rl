@@ -6,7 +6,7 @@ Gazebo Harmonic 8.15.0, x500 quad, headless.
 
 ## How the multi-instance launch actually works (PX4 v1.17.0)
 
-Worth recording since it's not obvious from the outside and shapes the M8
+Worth recording since it is not obvious from the outside and shapes the M9
 parallel-training design later:
 
 - `PX4_SIM_MODEL=gz_x500` + `PX4_GZ_WORLD=<world>` + `HEADLESS=1` on the
@@ -24,9 +24,24 @@ parallel-training design later:
   port bookkeeping needed on our side. `ROS_DOMAIN_ID` isolation is a
   separate concern for M2, not addressed here.
 - So "N parallel SITL instances" on this stack means **one Gazebo process
-  with N spawned vehicles**, not N separate Gazebo servers. This matters for
-  M8's resource planning — the shared physics server is one process to
-  budget, not N.
+  with N spawned vehicles**, not N separate Gazebo servers.
+
+> ⚠️ **Superseded 2026-08-20 — see [`parallelism.md`](parallelism.md).**
+> The observation above is correct: that *is* what PX4 does by default. The
+> conclusion drawn from it ("the shared physics server is one process to budget,
+> not N") is wrong for this project. A shared world means one physics thread for
+> all vehicles, one clock, one crash domain, and a **world-level** speed factor —
+> `px4-rc.gzsim:154` applies `PX4_SIM_SPEED_FACTOR` through a
+> `set_physics` service call on the world, so the last instance to start silently
+> overrides every earlier one's speed factor.
+>
+> Decision **D7** now requires one isolated Gazebo server per worker, via a
+> distinct `GZ_PARTITION`. Verified: two partitions produce two independent
+> `gz sim -s` processes with independently honoured RTF. Milestone **M1b**
+> reworks `sim_start.sh` accordingly.
+>
+> The RTF and flight-stability measurements below are unaffected — they were
+> single-instance.
 
 ## Real-time factor (RTF)
 
@@ -74,9 +89,9 @@ ceiling, not a **stability** ceiling.
 
 **Conclusion: maximum useful stable speed factor ≈ 8×.** This lands
 comfortably inside the "expect 3–8×" range `planning.md` §7.4 already
-budgeted for M8, and is well above the 4× threshold that would have
+budgeted for M9, and is well above the 4× threshold that would have
 triggered a re-plan per `milestones.md`'s M1 "watch out for" note — so no
-change to the M8 plan or decision D5 is needed.
+change to the M9 plan or decision D5 is needed. (M8 renumbered to M9 on 2026-08-20.)
 
 ## Two concurrent instances
 

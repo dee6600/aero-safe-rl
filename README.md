@@ -123,25 +123,34 @@ node could talk to a real PX4 flight controller unchanged.
 
 ## 🚧 Project status
 
-**Currently on M2** (ROS 2 ↔ PX4 integration). M0 and M1 are complete and
-verified — see [`milestones.md`](milestones.md) for the full task-by-task
-build log and [`docs/`](docs/) for measured numbers.
+**Currently on M2** (ROS 2 ↔ PX4 integration), with M1b open ahead of it. M0 and
+M1 are complete and verified — see [`milestones.md`](milestones.md) for the full
+task-by-task build log and [`docs/`](docs/) for measured numbers.
 
 | # | Milestone | Status |
 |---|---|---|
 | M0 | Environment setup and pinning | ✅ Done |
 | M1 | PX4 + Gazebo simulator running | ✅ Done |
-| M2 | ROS 2 talks to PX4 | ⬜ Not started |
-| M3 | Autonomous mission baseline | ⬜ Not started |
-| M4 | Telemetry feature pipeline | ⬜ Not started |
-| M5 | Fault injection + dataset | ⬜ Not started |
-| M6 | AI fault detector | ⬜ Not started |
-| M7 | Rule-based recovery baseline | ⬜ Not started |
-| M8 | RL recovery policy | ⬜ Not started |
-| M9 | Full experiments + results | ⬜ Not started |
-| M10 | Generalization tests | ⬜ Not started |
-| M11 | Hexacopter extension | ⬜ Not started |
-| M12 | Paper + reproducibility package | ⬜ Not started |
+| M1b | Worker isolation, ownership, identity | ⬜ Not started |
+| M2 | ROS 2 talks to PX4 | 🔨 In progress |
+| M3 | Autonomous mission baseline + episode contract | ⬜ Not started |
+| M4 | **Parallel simulation farm + episode runner** | ⬜ Not started |
+| M5 | Telemetry feature pipeline | ⬜ Not started |
+| M6 | Fault injection + dataset | ⬜ Not started |
+| M7 | AI fault detector | ⬜ Not started |
+| M8 | Rule-based recovery baseline | ⬜ Not started |
+| M9 | RL recovery policy | ⬜ Not started |
+| M10 | Full experiments + results | ⬜ Not started |
+| M11 | Generalization tests | ⬜ Not started |
+| M12 | Hexacopter extension | ⬜ Not started |
+| M13 | Paper + reproducibility package | ⬜ Not started |
+
+> **Renumbered 2026-08-20.** A dedicated parallel-simulation milestone was
+> inserted as M4, shifting the old M4–M12 to M5–M13. Parallel SITL turned out to
+> be the project's largest source of silent bugs and the gate on whether RL
+> training is feasible at all, so it now has its own acceptance criteria instead
+> of living inside the RL milestone. Mapping table in
+> [`milestones.md`](milestones.md).
 
 <details>
 <summary><b>What's actually been verified so far</b></summary>
@@ -158,9 +167,13 @@ build log and [`docs/`](docs/) for measured numbers.
   at **~8× real-time**; flight stayed stable and clean at every tested speed
   factor up to a 16× request. Full breakdown:
   [`docs/simulation_notes.md`](docs/simulation_notes.md).
-- **Multi-instance simulation confirmed conflict-free** — two concurrent PX4
-  instances share one Gazebo world with independent ports and spawn
-  positions, ready for M8's parallel training.
+- **Multi-instance simulation started conflict-free** — two concurrent PX4
+  instances came up with independent ports and spawn positions. ⚠️ **Since
+  revised:** they shared *one* Gazebo world, which is PX4's default but the wrong
+  topology for parallel RL — shared clock, world-level speed factor, shared crash
+  domain. M1b reworks the launcher for one isolated Gazebo server per worker
+  (`GZ_PARTITION`). Evidence and the corrected design:
+  [`docs/parallelism.md`](docs/parallelism.md).
 
 </details>
 
@@ -208,6 +221,7 @@ conda activate aero-safe-rl
 aero-safe-rl/
 ├── planning.md      # research plan: questions, architecture, decisions
 ├── milestones.md    # the build order — what to do, in what sequence
+├── CLAUDE.md        # coding rules every contributor and agent follows
 ├── configs/         # all experiment configuration (YAML)
 ├── simulation/      # PX4/Gazebo layer — models, fault injection
 ├── ros2_ws/src/     # colcon workspace — telemetry pipeline, mission executor
@@ -215,28 +229,33 @@ aero-safe-rl/
 ├── rl/              # reinforcement learning — env, rewards, policies
 ├── experiments/     # batch orchestration + analysis
 ├── scripts/         # env_report.sh, sim_start.sh, sim_stop.sh, ...
-├── tests/           # unit + integration tests
+├── tests/           # unit (default), sim/ (@sim), slow/ (@slow), fixtures/
 ├── results/         # raw logs, trained artifacts (git-ignored)
-└── docs/            # environment.md, simulation_notes.md, design notes
+└── docs/            # environment.md, parallelism.md, simulation_notes.md, ...
 ```
 
 </details>
 
 ## Roadmap
 
-This project is built in 12 ordered milestones, each with an explicit,
-runnable acceptance test — no milestone starts until the previous one's
-checks all pass.
+This project is built in 14 ordered milestones, each with an explicit,
+runnable acceptance test and its own unit tests — no milestone starts until the
+previous one's checks all pass.
 
 - **[`planning.md`](planning.md)** — the *what* and *why*: research
   questions, architecture, RL design, evaluation methodology, and every
   major decision with its reasoning.
 - **[`milestones.md`](milestones.md)** — the *how* and *in what order*:
-  concrete tasks, files created, and done-when checklists per milestone.
+  concrete tasks, files created, required tests, done-when checklists, and a
+  ready-to-paste implementation prompt per milestone.
+- **[`CLAUDE.md`](CLAUDE.md)** — the coding rules: instance identity, timing,
+  parallelism, testing tiers, and the anti-patterns that have cost time here.
+- **[`docs/parallelism.md`](docs/parallelism.md)** — verified multi-instance
+  PX4/Gazebo behaviour, with source references and measured output.
 
-**First result worth showing anyone** lands at the end of **M6** — a
+**First result worth showing anyone** lands at the end of **M7** — a
 detector that spots a weakening motor PX4 itself never notices.
-**First publishable result** lands at the end of **M9**.
+**First publishable result** lands at the end of **M10**.
 
 <details>
 <summary><b>Locked decisions</b></summary>
@@ -251,6 +270,11 @@ detector that spots a weakening motor PX4 itself never notices.
 | D4 | Evaluation includes an oracle-detector upper bound and a detector-ablation condition |
 | D5 | Simplified pre-training model **deferred** unless full-stack training proves infeasible |
 | D6 | **Gazebo stays primary** for all research milestones; Isaac Sim is an optional, non-blocking learning track |
+| D7 | **One Gazebo server per worker**, isolated by `GZ_PARTITION` — never the shared-world default |
+| D8 | **We own the Gazebo server process** so a single worker can be restarted without touching its siblings |
+| D9 | **Uniform instance identity**, no special case for instance 0; derived once and published as a file |
+| D10 | **Sim time is the only clock** in flight logic; wall clock only in the hang watchdog |
+| D11 | **Reproducibility is statistical, not bitwise** — pure functions are exact, whole-pipeline results reproduce within a measured band |
 
 Full reasoning for each: [`planning.md` §14](planning.md#14-decisions--all-approved-2026-08-14).
 

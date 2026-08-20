@@ -81,8 +81,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="$REPO_DIR/results/sim_logs"
 PID_DIR="/tmp/aero-safe-rl-sim"
 
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:${LD_LIBRARY_PATH:-}"
+
 if [ ! -x "$PX4_BIN" ]; then
 	echo "ERROR: $PX4_BIN not found. Build it first: cd $PX4_DIR && make px4_sitl" >&2
+	exit 1
+fi
+if ! command -v MicroXRCEAgent >/dev/null 2>&1; then
+	echo "ERROR: MicroXRCEAgent not found on PATH ($HOME/.local/bin)." >&2
 	exit 1
 fi
 
@@ -92,6 +99,21 @@ PID_FILE="$PID_DIR/px4_instance_${INSTANCE}.pid"
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
 	echo "ERROR: instance $INSTANCE already running (pid $(cat "$PID_FILE")). Stop it first with sim_stop.sh -i $INSTANCE" >&2
 	exit 1
+fi
+
+# Each instance gets its own uXRCE-DDS port (8888+instance) and ROS_DOMAIN_ID
+# (=instance), so this is ready for M8's multi-instance parallel training
+# without rework -- not just single-instance M2 use.
+XRCE_PORT=$((8888 + INSTANCE))
+XRCE_PID_FILE="$PID_DIR/xrce_agent_${INSTANCE}.pid"
+if [ -f "$XRCE_PID_FILE" ] && kill -0 "$(cat "$XRCE_PID_FILE")" 2>/dev/null; then
+	echo "MicroXRCEAgent for instance $INSTANCE already running (pid $(cat "$XRCE_PID_FILE"), port $XRCE_PORT)"
+else
+	XRCE_LOG="$LOG_DIR/xrce_agent_${INSTANCE}_$(date -u +%Y%m%dT%H%M%SZ).log"
+	MicroXRCEAgent udp4 -p "$XRCE_PORT" >"$XRCE_LOG" 2>&1 &
+	echo $! >"$XRCE_PID_FILE"
+	echo "MicroXRCEAgent started for instance $INSTANCE, pid $!, port $XRCE_PORT"
+	sleep 1
 fi
 
 if [ -z "$POSE" ]; then
@@ -104,7 +126,7 @@ HEADLESS_VAL=1
 
 LOG_FILE="$LOG_DIR/px4_instance_${INSTANCE}_$(date -u +%Y%m%dT%H%M%SZ).log"
 
-echo "Starting instance $INSTANCE: model=gz_${MODEL} world=${WORLD} speed=${SPEED}x pose=${POSE} headless=$([ -n "$HEADLESS_VAL" ] && echo yes || echo no)"
+echo "Starting instance $INSTANCE: model=gz_${MODEL} world=${WORLD} speed=${SPEED}x pose=${POSE} headless=$([ -n "$HEADLESS_VAL" ] && echo yes || echo no) xrce_port=${XRCE_PORT} ros_domain_id=${INSTANCE}"
 echo "Log: $LOG_FILE"
 
 env \
@@ -114,6 +136,8 @@ env \
 	PX4_GZ_MODEL_POSE="$POSE" \
 	GZ_IP=127.0.0.1 \
 	HEADLESS="$HEADLESS_VAL" \
+	PX4_UXRCE_DDS_PORT="$XRCE_PORT" \
+	ROS_DOMAIN_ID="$INSTANCE" \
 	"$PX4_BIN" -i "$INSTANCE" -d \
 	>"$LOG_FILE" 2>&1 &
 
@@ -128,6 +152,13 @@ echo "PX4 instance $INSTANCE started, pid $PX4_PID"
 ATTEMPTS=60
 while [ $ATTEMPTS -gt 0 ]; do
 	if grep -q "Startup script returned successfully" "$LOG_FILE" 2>/dev/null; then
+		# This project controls PX4 purely over ROS 2/DDS -- there is
+		# deliberately never a MAVLink GCS heartbeat. By default PX4 refuses
+		# to arm without one ("No connection to the GCS", governed by
+		# NAV_DLL_ACT, see rcAndDataLinkCheck.cpp). Disable that requirement
+		# here, once, for every instance -- every node in this project
+		# depends on being able to arm without a GCS link.
+		"$PX4_DIR/build/px4_sitl_default/bin/px4-param" set NAV_DLL_ACT 0 --instance "$INSTANCE" >/dev/null 2>&1
 		echo "Instance $INSTANCE ready."
 		exit 0
 	fi

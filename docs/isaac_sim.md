@@ -1,7 +1,7 @@
 # Isaac Sim — learning track notes
 
 This is the optional, non-blocking parallel track described in `planning.md`
-§10b and decision D6. It does not gate any research milestone (M1–M12 stay on
+§10b and decision D6. It does not gate any research milestone (M1–M13 stay on
 Gazebo Harmonic). Recorded here so the setup doesn't need to be repeated or
 re-diagnosed later.
 
@@ -50,7 +50,7 @@ This machine's 8GB VRAM is expected to support **one** Isaac Sim instance
 comfortably, not several in parallel — confirmed by NVIDIA's own guidance,
 not yet stress-tested here. That's fine for this track's scope (learning +
 a single-instance port of the baseline mission); it is exactly why this
-project's actual RL training (M8) stays on Gazebo. See `planning.md` D6 for
+project's actual RL training (M9) stays on Gazebo. See `planning.md` D6 for
 the full reasoning.
 
 ## Next step (not yet done)
