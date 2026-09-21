@@ -9,8 +9,14 @@
 # reset_tiers are mirrored by Python enums in that module; a test
 # (tests/test_episode_schema.py::test_termination_reason_enum_closed) pins
 # the two representations equal so they cannot silently drift apart.
+#
+# v3 (M5 task 2) added raw attitude/rate/acceleration/motor-output step
+# fields. These are RAW telemetry, not computed features -- M5's
+# FeatureExtractor (ai/features/feature_extractor.py) reads them to build a
+# feature vector on demand; no derived feature is written into the schema
+# itself, so a feature_version bump never forces a schema bump.
 
-schema_version: "2"
+schema_version: "3"
 
 # Closed enum. A record's termination_reason must be exactly one of these.
 # Extend deliberately when a milestone adds a real new outcome -- never write
@@ -94,3 +100,16 @@ step_fields:
     - target_z
     - position_error_m
     - battery_remaining
+    - roll_rad
+    - pitch_rad
+    - yaw_rad
+    - rate_p_rad_s
+    - rate_q_rad_s
+    - rate_r_rad_s
+    - accel_x_m_s2
+    - accel_y_m_s2
+    - accel_z_m_s2
+    - motor_0_output
+    - motor_1_output
+    - motor_2_output
+    - motor_3_output

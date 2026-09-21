@@ -16,6 +16,10 @@ STEP_TEMPLATE = dict(
     t_wall_utc=0.0, armed=True, nav_state=14,
     pos_x=0.0, pos_y=0.0, pos_z=-5.0, vel_x=0.0, vel_y=0.0, vel_z=0.0,
     target_x=0.0, target_y=0.0, target_z=-5.0, position_error_m=0.0, battery_remaining=1.0,
+    roll_rad=0.0, pitch_rad=0.0, yaw_rad=0.0,
+    rate_p_rad_s=0.0, rate_q_rad_s=0.0, rate_r_rad_s=0.0,
+    accel_x_m_s2=0.0, accel_y_m_s2=0.0, accel_z_m_s2=-9.81,
+    motor_0_output=0.5, motor_1_output=0.5, motor_2_output=0.5, motor_3_output=0.5,
 )
 
 EPISODE_TEMPLATE = dict(

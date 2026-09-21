@@ -1,0 +1,38 @@
+# RL policy observation spec (CLAUDE.md §0.1 -- one of the three artifacts
+# that cross the isaacsim/aero-safe-rl environment boundary, frozen by hand
+# before training starts). Written in M5 because the shared/px4_only split
+# has to be decided here, not guessed at in M9 (milestones.md M5's "second
+# non-negotiable").
+#
+# Every name below MUST have side: shared in configs/features.yaml --
+# tests/test_feature_extractor.py::test_observation_v1_features_are_all_marked_shared
+# enforces this. A px4_only feature here would mean the policy is trained on
+# an input Isaac cannot produce, so it could never transfer to the PX4 side.
+#
+# This file does not by itself make M9's policy exist -- it only fixes what
+# the policy will see, so M8b's Isaac env and M9's PX4 evaluation env are
+# built against the same, already-decided vector rather than two guesses.
+#
+# The detector's *output* (p(fault), fault class, severity, an uncertainty
+# proxy -- planning.md Phase 7) is how PX4-only information (motor outputs,
+# thrust_accel_residual, battery) reaches the policy without violating the
+# shared-only constraint: M9's env wrapper appends it to this vector, but it
+# is not a raw feature and is not listed here.
+
+obs_version: "1"
+feature_version: "1"
+
+features:
+  - roll_rad
+  - pitch_rad
+  - yaw_rad
+  - rate_p_rad_s
+  - rate_q_rad_s
+  - rate_r_rad_s
+  - accel_x_m_s2
+  - accel_y_m_s2
+  - accel_z_m_s2
+  - vel_x
+  - vel_y
+  - vel_z
+  - position_error_m

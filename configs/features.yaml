@@ -1,0 +1,136 @@
+# The feature contract (M5, CLAUDE.md §7). One implementation of feature
+# extraction reads this file: ai/features/feature_extractor.py. Nothing else
+# in the repo defines a feature list -- a second one anywhere is exactly the
+# "second implementation" CLAUDE.md §1.4 forbids.
+#
+# `side` is the D12 constraint (milestones.md M5, planning.md's RQ5 note):
+#   shared    -- computable identically in PX4 telemetry and in Isaac Lab.
+#                May feed the detector AND the RL policy observation.
+#   px4_only  -- exists only on the PX4 side (a PX4-internal controller
+#                quantity, or a sensor Isaac's stock task does not model).
+#                May feed the detector only -- never the policy observation.
+#                configs/rl/observation_v1.yaml is checked against this file
+#                by tests/test_feature_extractor.py so this can never drift
+#                silently.
+#
+# `source` names the raw telemetry field(s) a feature reads, as logged in
+# configs/schema/episode_record.yaml's step_fields (schema v3). Features are
+# computed from a causal TelemetryWindow over those raw fields -- see
+# ai/features/feature_extractor.py.
+
+feature_version: "1"
+
+window:
+  length_s: 1.5
+  rate_hz: 10.0   # must match mission_executor.py's CONTROL_RATE_HZ
+
+# Deferred, not implemented in v1 -- see milestones.md M5's "Scope decided
+# when this milestone started" note. Listed here so the gap is documented,
+# not silently absent.
+deferred:
+  - name: ekf_innovations
+    side: px4_only
+    reason: >
+      No EstimatorInnovations-family topic is currently subscribed by
+      PX4Interface (only the 9 telemetry topics M2 confirmed). Adding one is
+      a real scope item, not a v1 approximation.
+  - name: control_allocation_residual
+    side: px4_only
+    reason: >
+      Requires PX4's actual control-allocation matrix (a PX4 parameter set,
+      not telemetry) to compute a meaningful residual. Approximating it
+      without that matrix would be guessing, not measuring.
+
+features:
+  # --- shared (13): may feed the detector AND the RL policy observation ---
+  - name: roll_rad
+    side: shared
+    source: vehicle_attitude.q (Euler roll, via _quaternion_to_euler)
+    description: roll angle, radians, body FRD relative to NED earth frame
+  - name: pitch_rad
+    side: shared
+    source: vehicle_attitude.q (Euler pitch, via _quaternion_to_euler)
+    description: pitch angle, radians
+  - name: yaw_rad
+    side: shared
+    source: vehicle_attitude.q (Euler yaw, via _quaternion_to_euler)
+    description: yaw angle, radians
+  - name: rate_p_rad_s
+    side: shared
+    source: sensor_combined.gyro_rad[0]
+    description: body roll rate, rad/s, FRD body frame
+  - name: rate_q_rad_s
+    side: shared
+    source: sensor_combined.gyro_rad[1]
+    description: body pitch rate, rad/s
+  - name: rate_r_rad_s
+    side: shared
+    source: sensor_combined.gyro_rad[2]
+    description: body yaw rate, rad/s
+  - name: accel_x_m_s2
+    side: shared
+    source: sensor_combined.accelerometer_m_s2[0]
+    description: measured linear acceleration, FRD body X, m/s^2
+  - name: accel_y_m_s2
+    side: shared
+    source: sensor_combined.accelerometer_m_s2[1]
+    description: measured linear acceleration, FRD body Y, m/s^2
+  - name: accel_z_m_s2
+    side: shared
+    source: sensor_combined.accelerometer_m_s2[2]
+    description: measured linear acceleration, FRD body Z, m/s^2
+  - name: vel_x
+    side: shared
+    source: vehicle_odometry.velocity[0]
+    description: velocity, NED north, m/s
+  - name: vel_y
+    side: shared
+    source: vehicle_odometry.velocity[1]
+    description: velocity, NED east, m/s
+  - name: vel_z
+    side: shared
+    source: vehicle_odometry.velocity[2]
+    description: velocity, NED down, m/s
+  - name: position_error_m
+    side: shared
+    source: derived -- distance from vehicle_odometry.position to the mission's current target
+    description: Euclidean distance to the current waypoint/hover target, metres
+
+  # --- px4_only (6): detector input only, never the policy observation ---
+  - name: battery_remaining
+    side: px4_only
+    source: battery_status.remaining
+    description: >
+      Fraction of battery remaining, 0-1. px4_only because Isaac Lab's stock
+      quadrotor task has no battery model -- a policy could not use this
+      signal even if it wanted to.
+  - name: motor_0_output
+    side: px4_only
+    source: actuator_motors.control[0]
+    description: normalised commanded thrust for motor 0, range approx [-1, 1]
+  - name: motor_1_output
+    side: px4_only
+    source: actuator_motors.control[1]
+    description: normalised commanded thrust for motor 1
+  - name: motor_2_output
+    side: px4_only
+    source: actuator_motors.control[2]
+    description: normalised commanded thrust for motor 2
+  - name: motor_3_output
+    side: px4_only
+    source: actuator_motors.control[3]
+    description: normalised commanded thrust for motor 3
+  - name: thrust_accel_residual
+    side: px4_only
+    source: derived -- actuator_motors.control[0:4] and sensor_combined.accelerometer_m_s2, over the window
+    description: >
+      First-cut heuristic for the "commanded more thrust, achieved less
+      acceleration" signature of a degraded rotor (planning.md Phase 5):
+      how far this instant's mean commanded motor output deviates from its
+      own recent window baseline, compared to how far the achieved
+      acceleration magnitude deviates from its baseline. Self-relative
+      (baseline-vs-baseline) rather than an absolute hover-thrust physics
+      constant, because sensor_combined's accelerometer sign convention was
+      not independently re-verified when this was written -- see
+      ai/features/feature_extractor.py. Its actual discriminative power
+      against a real injected fault is measured in M6/M7, not assumed here.

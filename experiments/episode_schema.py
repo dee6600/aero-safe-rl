@@ -22,12 +22,14 @@ from typing import Any, Mapping
 import yaml
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "configs" / "schema" / "episode_record.yaml"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
-# M5 has not been built yet, but the schema requires feature_version on every
-# record so M5 does not need to migrate an already-written field into
-# existence. Every M3/M4 writer uses this placeholder until configs/features.yaml
-# defines a real one.
+# configs/features.yaml now defines a real feature_version ("1", as of M5),
+# but no writer in this repo computes and tags actual feature vectors yet --
+# that is M6's dataset builder or M7's, whichever consumes
+# ai/features/feature_extractor.py first (milestones.md M5: "What M5 does
+# not do"). Every current writer (EpisodeRunner, run_episodes.py, SimFarm)
+# still uses this placeholder.
 FEATURE_VERSION_UNSET = "unversioned"
 
 

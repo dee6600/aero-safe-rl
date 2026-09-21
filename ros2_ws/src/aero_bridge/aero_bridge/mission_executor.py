@@ -88,6 +88,26 @@ def _is_finite_state(px: float, py: float, pz: float,
     return all(math.isfinite(v) for v in (px, py, pz, vx, vy, vz))
 
 
+def _quaternion_to_euler(q: tuple[float, float, float, float]) -> tuple[float, float, float]:
+    """Hamiltonian quaternion q=(w, x, y, z), FRD body frame relative to NED
+    earth frame -- confirmed from VehicleAttitude.msg's own comment
+    ("The quaternion uses the Hamilton convention, and the order is
+    q(w, x, y, z)"), not guessed (M0's rule: verify actual field meanings,
+    don't assume them). Returns (roll, pitch, yaw) in radians, the standard
+    aerospace ZYX Euler sequence.
+
+    A pure function of four floats, tested directly
+    (tests/test_mission_executor.py) rather than only indirectly through a
+    live flight -- this is exactly the kind of conversion that is easy to
+    get silently backwards (M5's own watch-out-for note)."""
+    w, x, y, z = q
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.asin(sin_pitch)
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return roll, pitch, yaw
+
+
 _REQUIRED_MISSION_FIELDS = (
     "mission_id", "schema_version", "altitude_m", "acceptance_radius_m",
     "hold_time_s", "final_hover_s", "timeout_s", "waypoints", "geofence",
@@ -203,7 +223,10 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
     def record_step(target: tuple[float, float, float]) -> None:
         odom = px4.latest['vehicle_odometry']
         status = px4.latest['vehicle_status']
-        if odom is None or status is None:
+        attitude = px4.latest['vehicle_attitude']
+        sensors = px4.latest['sensor_combined']
+        motors = px4.latest['actuator_motors']
+        if odom is None or status is None or attitude is None or sensors is None:
             return
         battery = px4.latest['battery_status']
         px, py, pz = odom.position[0], odom.position[1], odom.position[2]
@@ -212,6 +235,14 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
             raise SimFault(f"non-finite vehicle state: pos=({px},{py},{pz}) vel=({vx},{vy},{vz})")
         err = math.dist((px, py, pz), target)
         errors.append(err)
+        roll, pitch, yaw = _quaternion_to_euler(tuple(attitude.q))
+        # actuator_motors.control has up to 12 entries; this project's
+        # airframe (x500) uses the first 4 (schema v3 -- M5 task 2). NaN
+        # ("not supported by this output" per ActuatorMotors.msg) can appear
+        # briefly around arm/disarm transitions; passed through as-is rather
+        # than papered over, since a NaN motor output IS the true value.
+        motor_outputs = (
+            tuple(motors.control[0:4]) if motors is not None else (float('nan'),) * 4)
         row = dict(
             step_index=state["step_index"],
             t_sim_s=(clock.now_us() or 0) / 1e6,
@@ -223,6 +254,14 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
             target_x=target[0], target_y=target[1], target_z=target[2],
             position_error_m=err,
             battery_remaining=(battery.remaining if battery is not None else float('nan')),
+            roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
+            rate_p_rad_s=sensors.gyro_rad[0], rate_q_rad_s=sensors.gyro_rad[1],
+            rate_r_rad_s=sensors.gyro_rad[2],
+            accel_x_m_s2=sensors.accelerometer_m_s2[0],
+            accel_y_m_s2=sensors.accelerometer_m_s2[1],
+            accel_z_m_s2=sensors.accelerometer_m_s2[2],
+            motor_0_output=motor_outputs[0], motor_1_output=motor_outputs[1],
+            motor_2_output=motor_outputs[2], motor_3_output=motor_outputs[3],
         )
         state["step_index"] += 1
         steps.append(row)

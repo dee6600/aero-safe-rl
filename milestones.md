@@ -5,7 +5,9 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1, M1b and M3 done. M2 substantially done —
+Status: M0 (incl. addendum), M1, M1b, M3 and M5 done. M4 substantially done
+(one deferred sim-marked test, `tests/sim/test_worker_restart.py`, still
+open — see M4). M2 substantially done —
 both known multi-instance bugs fixed and verified; a third, subtler bug
 found and fixed (px4_msgs timestamps are not simulated time,
 `docs/parallelism.md` §2.5). One item deliberately left open: concurrent
@@ -1402,7 +1404,28 @@ use pkill; do not drop failed episodes silently.
 ```
 
 ---
-# M5 — Telemetry feature pipeline
+# M5 — Telemetry feature pipeline ✅
+
+**M5 complete (2026-09-22).** All 6 tasks done and verified, including
+against a real live flight, not only fixtures. `configs/features.yaml` (13
+shared + 6 px4_only features, `feature_version: "1"`), `configs/rl/
+observation_v1.yaml` (obs_version "1"), episode schema v3 (raw attitude/
+rate/acceleration/motor-output fields), `ai/features/feature_extractor.py`
+(`TelemetryWindow` + `FeatureExtractor`, no ROS import), and `configs/rl/
+normalization_v1.yaml` all exist and are cross-consistency-tested. One
+naming correction made while implementing task 1 against the real, already-
+existing schema: the plan below originally spelled the velocity/position-
+error features `vel_x_m_s`/`vel_y_m_s`/`vel_z_m_s`/`pos_error_m`, but schema
+v2's step_fields already used `vel_x`/`vel_y`/`vel_z`/`position_error_m` --
+caught immediately by the live sim test (task 6) failing with a
+`KeyError`/missing-field error the moment real parquet columns were fed
+through the extractor. Renamed the feature names to match the existing
+schema rather than inventing a second name for the same quantity
+(CLAUDE.md §1.4) -- `configs/features.yaml`, `observation_v1.yaml` and
+`feature_extractor.py` all reflect the corrected names; the task
+description below is left showing the original (wrong) names with this
+note, rather than silently edited, so the mismatch and its catch are on the
+record.
 
 **Goal:** turn raw telemetry into one fixed-size vector, produced 10 times per
 second, used identically by the detector and the RL policy. One implementation,
@@ -1443,6 +1466,274 @@ compute it, and a unit test asserts that everything referenced by
 `configs/rl/observation_v1.yaml` is marked shared. Note this costs the policy
 nothing it actually needs: the PX4-only signals are exactly the ones the
 *detector* consumes, and the policy sees the detector's output, not its input.
+
+**Scope decided when this milestone started (2026-09-22).** `EKF innovations`
+and `control-allocation residual` are real PX4-side signals, but computing
+either correctly needs telemetry this project does not currently subscribe to
+(an `EstimatorInnovations`-family topic; PX4's actual allocation matrix). Both
+are deferred past v1 rather than approximated badly — `configs/features.yaml`
+records them as `status: deferred` with the reason, so this is a documented
+scope cut, not a silent gap. v1's PX4-only feature set is instead the signals
+already reachable from the 9 telemetry topics M2 confirmed: per-motor
+normalised outputs (`actuator_motors`), battery, and a first-cut
+thrust-vs-achieved-acceleration residual (below).
+
+**What M5 does *not* do:** compute features live during a flight or write
+them into episode records. `EpisodeRunner`/`mission_executor.py` keep
+writing raw telemetry only; `feature_version` on every episode record stays
+`FEATURE_VERSION_UNSET` until a real consumer (M6's dataset builder, or M7)
+actually calls `FeatureExtractor` and tags its output. `FeatureExtractor` is
+built and proven correct here, against recorded/fixture telemetry, precisely
+so those later milestones have a single, already-tested implementation to
+import rather than building their own.
+
+### Tasks
+
+1. ✅ **`configs/features.yaml` — the feature contract.** `feature_version:
+   "1"`. One entry per feature: `name`, `side` (`shared` | `px4_only`),
+   `source` (which raw telemetry field(s) it comes from), one-line
+   `description`. Plus a `window` block (`length_s: 1.5`, `rate_hz: 10.0`,
+   matching `mission_executor.py`'s `CONTROL_RATE_HZ`). v1's feature list:
+   - *shared* (13): `roll_rad`, `pitch_rad`, `yaw_rad` (attitude);
+     `rate_p_rad_s`, `rate_q_rad_s`, `rate_r_rad_s` (body rates);
+     `accel_x_m_s2`, `accel_y_m_s2`, `accel_z_m_s2` (linear acceleration);
+     `vel_x_m_s`, `vel_y_m_s`, `vel_z_m_s`; `pos_error_m`.
+   - *px4_only* (6): `battery_remaining`; `motor_0_output` .. `motor_3_output`
+     (normalised, from `actuator_motors.control[0:4]`); `thrust_accel_residual`
+     (derived — see task 3).
+   Battery is `px4_only`, not shared: Isaac Lab's stock quadrotor task has no
+   battery model, so a policy trained on it cannot use battery state.
+2. ✅ **Extend the episode record schema to v3** — the raw ingredients
+   `FeatureExtractor` needs are not currently logged.
+   `configs/schema/episode_record.yaml`: `schema_version: "3"`, `step_fields`
+   gains `roll_rad`, `pitch_rad`, `yaw_rad`, `rate_p_rad_s`, `rate_q_rad_s`,
+   `rate_r_rad_s`, `accel_x_m_s2`, `accel_y_m_s2`, `accel_z_m_s2`,
+   `motor_0_output` .. `motor_3_output`. `experiments/episode_schema.py`'s
+   `SCHEMA_VERSION` bumps to match. `mission_executor.py`'s `record_step()`
+   populates the new fields from `px4.latest['vehicle_attitude']` (quaternion
+   → Euler, Hamiltonian `q=[w,x,y,z]`, FRD body → NED earth — confirmed from
+   `VehicleAttitude.msg`, not guessed, per M0's rule) and
+   `px4.latest['sensor_combined']` (`gyro_rad`, `accelerometer_m_s2`) and
+   `px4.latest['actuator_motors']` (`control[0:4]`). Quaternion→Euler is a
+   pure function (`_quaternion_to_euler`), unit tested directly — this is
+   exactly the kind of conversion M0 warns about getting silently backwards.
+   Raw telemetry only — no derived features are written to the schema.
+3. ✅ **`ai/features/feature_extractor.py` — the one implementation.** Pure
+   Python + NumPy, **no ROS import**, so the `isaacsim` env can import the
+   shared subset without ever touching `rclpy` (CLAUDE.md §0.1). Two pieces:
+   - `TelemetryWindow` — an append-only, fixed-capacity buffer
+     (`capacity = round(length_s * rate_hz)` = 15 frames). `append()` rejects
+     an out-of-order (non-monotonic `t_sim_s`) frame. This is what makes
+     causality structural rather than a discipline everyone has to remember.
+   - `FeatureExtractor.extract(window) -> dict[str, float]` — 13 shared
+     features pass through from the window's latest frame; `battery_remaining`
+     and the 4 motor outputs likewise; `thrust_accel_residual` is the one
+     genuinely derived feature: `(commanded_thrust_frac_t -
+     window_mean(commanded_thrust_frac)) - (accel_magnitude_t -
+     window_mean(accel_magnitude)) / g`, i.e. how far *this instant's*
+     commanded thrust deviates from its own recent baseline, compared to how
+     far the achieved acceleration magnitude deviates from *its* baseline.
+     Deliberately self-relative (baseline-vs-baseline) rather than an
+     absolute hover-thrust physics constant, because the sign convention of
+     `sensor_combined.accelerometer_m_s2` was not independently re-verified
+     here — a magnitude-based, self-relative formula is correct regardless
+     of that sign. **Documented as a first-cut heuristic**: its actual
+     discriminative power against a real injected fault is an M6/M7
+     question, not asserted here.
+   Also: `shared_feature_names()`, `px4_only_feature_names()`,
+   `all_feature_names()`, reading `configs/features.yaml` once and caching it
+   (same pattern as `episode_schema.load_schema()`).
+4. ✅ **`configs/rl/observation_v1.yaml`.** `obs_version: "1"`, `feature_version:
+   "1"`, and the list of the 13 shared feature names — nothing else. A
+   comment records that the detector's *output* (not raw features) is how
+   PX4-only information reaches the policy, decided by M9's env wrapper, not
+   here.
+5. ✅ **Normalisation statistics — computed once, frozen.** A script
+   (`experiments/analysis/compute_normalization_stats.py`) that reads a
+   healthy-flight run's raw step telemetry (schema v3), runs
+   `FeatureExtractor` causally over every episode, and writes per-feature
+   mean/std to `configs/rl/normalization_v1.yaml` (`norm_version: "1"`,
+   `feature_version: "1"`). Run for real against a fresh 10-episode
+   `square_circuit` run flown live under the new schema
+   (`results/m5_norm_stats_healthy_10/`, 11 valid episodes — 10 completed
+   plus one hard-reset retry after an `episode_timeout`, contributing 3,740
+   steps total; one `preflight_failed` attempt with zero steps recorded was
+   correctly skipped rather than crashing the script on an empty frame,
+   a real bug found and fixed live during this task). M3's existing 20-run
+   fixtures could not be reused: they predate schema v3 and lack the new raw
+   fields entirely. The resulting statistics are physically sane on
+   inspection — e.g. `accel_z_m_s2` mean ≈ -10.44 m/s² (close to -g plus
+   flight dynamics) and motor outputs cluster around ≈0.70 ± 0.19, a
+   plausible hover throttle fraction. **Never recomputed after training
+   starts** (CLAUDE.md anti-pattern 11) — this file, once written, is
+   read-only input to everything downstream.
+6. ✅ **Validation.** `tests/sim/test_feature_pipeline.py` (`@pytest.mark.sim`):
+   flies one real healthy mission, runs `FeatureExtractor` causally over its
+   logged steps, and asserts every shared feature is finite (no NaN/Inf) and
+   `t_sim_s` never goes backwards with no gap large enough to mean a dropped
+   step — this is the "no NaNs/gaps over a full healthy mission" check from
+   `planning.md` Phase 5, and it is also what actually confirmed the
+   quaternion/gyro/accel field names, the Euler conversion, and (see the
+   note above this task list) the raw feature *names* were right, rather
+   than merely plausible: the first live run caught the `vel_x_m_s`/
+   `pos_error_m` naming mismatch, and a second live-data finding refined
+   the gap check itself -- at `speed_factor=4x`, `mission_executor.py`'s
+   control loop legitimately records steps ~0.4s apart in sim time (not
+   ~0.1s -- the poll cadence is wall-clock-paced, so sim time between
+   recorded ticks scales with the speed factor), and one single ~2s outlier
+   tick occurred live from ordinary CPU/DDS scheduling jitter right after
+   arm+offboard engage (the same "startup is the most fragile moment"
+   effect M4 already documents). The test now checks the *median* step
+   spacing plus a generous absolute outlier bound, the same choice M2's
+   telemetry sanity test made for the same reason, rather than a strict
+   per-step maximum.
+
+### Files created
+
+```
+configs/features.yaml
+configs/rl/observation_v1.yaml
+configs/rl/normalization_v1.yaml              (written by task 5's script, not hand-authored)
+ai/features/__init__.py
+ai/features/feature_extractor.py
+experiments/analysis/compute_normalization_stats.py
+configs/schema/episode_record.yaml             (v2 -> v3)
+experiments/episode_schema.py                  (SCHEMA_VERSION bump)
+ros2_ws/src/aero_bridge/aero_bridge/mission_executor.py   (record_step + _quaternion_to_euler)
+```
+
+### Tests (required)
+
+```
+tests/test_feature_extractor.py
+tests/test_mission_executor.py           (extended — _quaternion_to_euler)
+tests/test_episode_schema.py             (extended — v3 fields, version bump)
+tests/sim/test_feature_pipeline.py       (@pytest.mark.sim)
+```
+
+- ✅ `test_window_rejects_out_of_order_append` / `test_window_respects_capacity` /
+  `test_window_accepts_equal_timestamps` / `test_window_append_rejects_incomplete_frame`
+- ✅ `test_extract_output_matches_feature_order` — keys equal
+  `all_feature_names()`, in the same order every time.
+- ✅ `test_extractor_is_causal` — a feature vector computed from a window
+  truncated at frame `k` is bit-identical whether or not later frames ever
+  get appended; **the regression test for lookahead leakage.**
+- ✅ `test_extract_is_deterministic` / `test_extract_series_matches_incremental_online_extraction` /
+  `test_extract_series_output_for_a_frame_is_unaffected_by_later_frames` —
+  calling `extract()` twice on the same window gives a bit-identical result
+  (`planning.md` Phase 5's replay determinism check, at the unit level), and
+  the offline batch helper (`extract_series`, M6's future dataset builder)
+  is proven equal to online incremental extraction.
+- ✅ `test_thrust_accel_residual_is_zero_on_a_single_frame_window` /
+  `test_thrust_accel_residual_is_finite_and_reacts_to_a_thrust_spike` — no
+  baseline yet, so the derived feature must not divide by zero or crash, and
+  it does move in the expected direction for a synthetic thrust spike.
+- ✅ `test_observation_v1_features_are_all_marked_shared` — **the test the
+  D12 constraint exists for**: every name in `configs/rl/observation_v1.yaml`
+  has `side: shared` in `configs/features.yaml`.
+- ✅ `test_observation_v1_feature_version_matches_features_yaml` /
+  `test_normalization_v1_feature_version_matches_features_yaml` (the latter
+  skips until `normalization_v1.yaml` exists, then runs for real) —
+  `features.yaml`, `observation_v1.yaml` and `normalization_v1.yaml` all
+  carry the same `feature_version`.
+- ✅ `test_quaternion_to_euler_identity_is_zero` / `..._90_degree_roll` /
+  `..._90_degree_yaw` / `..._handles_gimbal_lock_pitch_without_crashing` —
+  identity quaternion gives `(0,0,0)`; hand-computed 90°-rotation cases
+  match; the pitch-singularity clip doesn't crash or go non-finite.
+- ✅ `test_healthy_mission_features_have_no_nans_or_gaps` (sim) — real flight,
+  real telemetry, the actual validation `planning.md` Phase 5 asks for.
+  Passed live, 2026-09-22, against a real `square_circuit` flight at 4x
+  speed (289 steps).
+
+### Done when
+
+- [x] `configs/features.yaml` and `configs/rl/observation_v1.yaml` exist and
+      validate; every shared feature the observation spec references is
+      marked `shared` — `test_observation_v1_features_are_all_marked_shared`.
+- [x] Episode schema v3 round-trips: a step record with the new raw fields
+      validates, and `test_termination_reason_enum_closed`-style drift tests
+      still pass.
+- [x] `FeatureExtractor` produces a deterministic, causal, fixed-order vector
+      from a `TelemetryWindow`, proven by unit tests against fixtures — no
+      simulator needed to iterate on it (the whole point, per `planning.md`
+      Phase 5's rationale for M7 iterating offline).
+- [x] A real healthy mission's logged telemetry, run through
+      `FeatureExtractor`, has zero NaNs and no dropped-step-sized time gaps —
+      confirmed live (task 6).
+- [x] `configs/rl/normalization_v1.yaml` exists, was computed from an 11-
+      episode healthy dataset flown live under schema v3
+      (`results/m5_norm_stats_healthy_10/`), and is committed as frozen (not
+      regenerated by any later milestone without a version bump).
+- [x] `pytest tests/ -m "not sim and not slow"` passes — 190 passed, 0
+      skipped (the `normalization_v1.yaml`-gated test runs for real once
+      that file exists).
+
+### Verify with
+
+```bash
+pytest tests/ -m "not sim and not slow" -q
+pytest tests/sim/test_feature_pipeline.py -q         # starts/stops its own worker via SimFarm
+scripts/sim_start.sh -i 0
+python experiments/run_episodes.py --mission square_circuit --n 10 --instance 0 --run-id <run_id>
+python experiments/analysis/compute_normalization_stats.py results/<run_id>/ --out configs/rl/normalization_v1.yaml
+scripts/sim_stop.sh --all
+```
+
+Actually run 2026-09-22: all of the above passed live, including
+`pgrep`-confirmed clean teardown after `scripts/sim_stop.sh --all`
+(`results/m5_norm_stats_healthy_10/` is the real run `normalization_v1.yaml`
+was computed from).
+
+### Watch out for
+
+- **Do not guess the quaternion order or field names.** `VehicleAttitude.msg`
+  and `SensorCombined.msg` are the ground truth (already read for this
+  milestone's plan); a wrong sign or wrong field name here corrupts every
+  feature downstream of it silently, the same failure mode M0 already warned
+  about for `px4_msgs` generally.
+- **`configs/rl/normalization_v1.yaml` is a frozen artifact, not a config to
+  hand-edit.** If the feature set changes, bump `feature_version`, regenerate
+  it, and bump `norm_version` — never edit it in place (CLAUDE.md §7,
+  anti-pattern 11).
+- **Do not wire `FeatureExtractor` into `EpisodeRunner` yet.** That is a
+  design decision for whichever of M6 (dataset builder) or M7 (detector)
+  actually consumes it first — doing it here would be guessing at their
+  interface before either exists.
+
+### Claude Code prompt
+
+```
+Read CLAUDE.md, planning.md Phase 5 (and its D12 note), and milestones.md M5.
+
+Implement M5 tasks 1-4: configs/features.yaml, the schema v3 raw-telemetry
+fields (+ mission_executor.py wiring), ai/features/feature_extractor.py, and
+configs/rl/observation_v1.yaml.
+
+Constraints:
+  - ai/features/feature_extractor.py imports no ROS/rclpy — it must be
+    importable from the isaacsim conda env unmodified (CLAUDE.md §0.1).
+  - Every feature in observation_v1.yaml must be side: shared in
+    features.yaml; write the test that checks this before anything else.
+  - TelemetryWindow.append() rejects out-of-order frames -- causality is
+    structural, not a comment.
+  - Quaternion order is Hamiltonian (w,x,y,z), FRD body -> NED earth, per
+    VehicleAttitude.msg -- verify against the actual .msg file, don't guess.
+  - No feature computation is wired into EpisodeRunner in this task.
+
+Deliverables:
+  - configs/features.yaml, configs/rl/observation_v1.yaml
+  - configs/schema/episode_record.yaml (v3), episode_schema.py (version bump)
+  - ai/features/feature_extractor.py, ai/features/__init__.py
+  - mission_executor.py's record_step() populating the new raw fields
+  - tests/test_feature_extractor.py, extensions to tests/test_mission_executor.py
+    and tests/test_episode_schema.py, per M5's test list
+
+Verify: pytest tests/ -m "not sim and not slow" -q
+
+Do not: add EKF innovations or control-allocation residual (deferred,
+undocumented telemetry gap); do not hand-edit a normalization file; do not
+import rclpy anywhere under ai/.
+```
 
 ---
 
