@@ -23,6 +23,21 @@ start method, set explicitly -- never the platform default, CLAUDE.md §3.3).
 Nothing above this module re-implements "fly a worker's episodes"; it is a
 caller of EpisodeRunner and next_reset_tier(), exactly like run_episodes.py.
 
+**Any script that constructs a SimFarm must guard that code with
+`if __name__ == "__main__":`.** This is not a style preference here -- the
+spawn start method re-imports the launching script in every child process to
+bootstrap it, so a SimFarm(...) call sitting at a script's top level runs
+AGAIN, recursively, inside every worker process it creates (which then tries
+to spawn its own children, ad infinitum in principle; in practice the nested
+attempts fail fast because sim_start.sh refuses an already-running instance
+-- but not before wasting real time and CPU competing with the real run).
+Found live while building vis_sim.md: an unguarded example script produced
+exactly this -- workers started correctly, but the recursive re-imports
+piled enough CPU contention onto the real run that scripts/env_report.sh's
+own 30s subprocess timeout in __init__ (see below) tripped, which looked
+like a crash. run_episodes.py already does this correctly (see its own
+`if __name__ == "__main__":` block) -- follow that pattern, always.
+
 Explicitly out of scope for this session (M4 tasks 1-3; see milestones.md):
 task 4's full structured-failure handling -- this module restarts a dead
 worker and counts the restart, but does not yet synthesize a placeholder
@@ -155,6 +170,26 @@ class SimFarm:
         import datetime
         import uuid
 
+        from aero_bridge.mission_executor import load_mission
+        from experiments.episode_schema import digest
+
+        # Loaded and captured HERE, before any worker starts (even before
+        # __enter__), not in run(). Found live: capture_env_versions() shells
+        # out to scripts/env_report.sh with a 30s subprocess timeout, and
+        # env_report.sh itself runs several subprocess calls of its own (gz,
+        # git, python); when run() used to call it AFTER __enter__ had
+        # already started GUI workers, two concurrent GUI-rendered Gazebo
+        # instances contended for CPU heavily enough (load average >10 on a
+        # 12-thread machine, measured) that env_report.sh missed its 30s
+        # budget, raised, and unwound the whole `with` block -- stopping both
+        # freshly started workers and exiting, which looked exactly like a
+        # crash. A bad mission_id now also fails here, before any worker is
+        # started, rather than inside run() after workers are already up.
+        mission_path = REPO / "configs" / "missions" / f"{mission_id}.yaml"
+        self._mission = load_mission(mission_path)
+        self._mission_digest = digest(self._mission)
+        self._env_versions_json = json.dumps(capture_env_versions(), sort_keys=True)
+
         self.worker_count = worker_count
         self.mission_id = mission_id
         self.n_episodes_per_worker = n_episodes_per_worker
@@ -217,18 +252,10 @@ class SimFarm:
         (in arrival order, not per-worker order). Must be called inside the
         `with SimFarm(...) as farm:` block, after __enter__ has started the
         workers' OS processes."""
-        from aero_bridge.mission_executor import load_mission
-        from experiments.episode_schema import digest
-
-        mission_path = REPO / "configs" / "missions" / f"{self.mission_id}.yaml"
-        mission = load_mission(mission_path)
-        mission_digest = digest(mission)
-        env_versions_json = json.dumps(capture_env_versions(), sort_keys=True)
-
         for sup in self.supervisors:
             self._spawn_worker(sup, start_index=0, n_episodes=self.n_episodes_per_worker,
-                                mission=mission, mission_digest=mission_digest,
-                                env_versions_json=env_versions_json)
+                                mission=self._mission, mission_digest=self._mission_digest,
+                                env_versions_json=self._env_versions_json)
 
         deadline = time.monotonic() + self.max_wall_s
         while True:
@@ -250,14 +277,16 @@ class SimFarm:
                 # Process exited before finishing its quota -- unhealthy by
                 # definition (is_healthy() would also catch a hung-but-alive
                 # process via the heartbeat-staleness check below).
-                self._restart_and_resume(sup, mission, mission_digest, env_versions_json)
+                self._restart_and_resume(sup, self._mission, self._mission_digest,
+                                          self._env_versions_json)
 
             for sup in self.supervisors:
                 if not sup.process.is_alive():
                     continue
                 try:
                     if sup.ensure_healthy():
-                        self._on_restart(sup, mission, mission_digest, env_versions_json)
+                        self._on_restart(sup, self._mission, self._mission_digest,
+                                          self._env_versions_json)
                 except RestartBudgetExhausted as exc:
                     raise SimFarmError(str(exc)) from exc
 

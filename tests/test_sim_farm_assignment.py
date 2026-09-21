@@ -56,35 +56,45 @@ class FakeSupervisor:
             raise RuntimeError(f"simulated stop failure for worker {self.spec.instance}")
 
 
-def _farm_with_fakes(n=2, **fake_kwargs):
+def _farm_with_fakes(monkeypatch, n=2, **fake_kwargs):
     """A SimFarm built the normal way (so worker_count/mission_id/etc. are
     real), then with its supervisors swapped for fakes before the
     with-block runs -- __enter__/__exit__ only ever call .start()/.stop()
-    on self.supervisors, so this is enough to test the contract in full."""
+    on self.supervisors, so this is enough to test the contract in full.
+
+    capture_env_versions() is stubbed out: SimFarm.__init__ calls it (a real
+    subprocess running scripts/env_report.sh, ~1-2s) so that it happens
+    before any worker starts rather than contending with one for CPU (found
+    live: under two concurrent GUI workers this call missed its own 30s
+    timeout and looked like a crash -- see experiments/sim_farm.py's
+    __init__ docstring). These tests don't exercise that subprocess at all,
+    so stubbing it is what keeps this file's own promise of running in
+    milliseconds, not ~2s x however many SimFarm() constructions it does."""
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
     farm = SimFarm(worker_count=n, mission_id="square_circuit", n_episodes_per_worker=1,
                     stagger_s=0.0)
     farm.supervisors = [FakeSupervisor(k, **fake_kwargs) for k in range(n)]
     return farm
 
 
-def test_enter_starts_every_worker():
-    farm = _farm_with_fakes(n=3)
+def test_enter_starts_every_worker(monkeypatch):
+    farm = _farm_with_fakes(monkeypatch, n=3)
     with farm:
         pass
     assert all(sup.start_calls == 1 for sup in farm.supervisors)
 
 
-def test_exit_stops_every_worker():
-    farm = _farm_with_fakes(n=3)
+def test_exit_stops_every_worker(monkeypatch):
+    farm = _farm_with_fakes(monkeypatch, n=3)
     with farm:
         pass
     assert all(sup.stop_calls == 1 for sup in farm.supervisors)
 
 
-def test_farm_stops_all_on_exception():
+def test_farm_stops_all_on_exception(monkeypatch):
     """The milestone's own required test: an exception inside the
     context manager still stops every worker."""
-    farm = _farm_with_fakes(n=3)
+    farm = _farm_with_fakes(monkeypatch, n=3)
     with pytest.raises(ValueError, match="boom"):
         with farm:
             raise ValueError("boom")
@@ -92,11 +102,11 @@ def test_farm_stops_all_on_exception():
         "every worker must be stopped even though the with-block raised"
 
 
-def test_exit_attempts_every_stop_even_if_one_fails():
+def test_exit_attempts_every_stop_even_if_one_fails(monkeypatch):
     """One worker's stop() failing must not prevent the OTHERS from being
     stopped -- CLAUDE.md's "leave nothing running" requirement doesn't get
     to make an exception for the first failure it hits."""
-    farm = _farm_with_fakes(n=3)
+    farm = _farm_with_fakes(monkeypatch, n=3)
     farm.supervisors[1].fail_stop = True
     with pytest.raises(SimFarmError):
         with farm:
@@ -105,11 +115,11 @@ def test_exit_attempts_every_stop_even_if_one_fails():
         "worker 0 and 2 must still be stopped despite worker 1's stop() raising"
 
 
-def test_original_exception_takes_priority_over_a_stop_failure():
+def test_original_exception_takes_priority_over_a_stop_failure(monkeypatch):
     """If the with-block itself raised AND a stop() also fails, the
     with-block's own exception must be what propagates -- a cleanup failure
     must never mask the real error that caused it."""
-    farm = _farm_with_fakes(n=2)
+    farm = _farm_with_fakes(monkeypatch, n=2)
     farm.supervisors[0].fail_stop = True
     with pytest.raises(ValueError, match="the real error"):
         with farm:
