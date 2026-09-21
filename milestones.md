@@ -5,19 +5,56 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1 and M1b done. M2 substantially done — both
-known multi-instance bugs fixed and verified; a third, subtler bug found and
-fixed (px4_msgs timestamps are not simulated time, `docs/parallelism.md`
-§2.5). One item deliberately left open: concurrent two-worker flights hit a
-real, confirmed, unresolved `offboard_control_signal_lost` reliability gap
-(§2.6) at a significant rate (~35-65%), not caused by this project's own
-code; a partial mitigation shipped, full resolution deferred to M4.
+Status: M0 (incl. addendum), M1, M1b and M3 done. M2 substantially done —
+both known multi-instance bugs fixed and verified; a third, subtler bug
+found and fixed (px4_msgs timestamps are not simulated time,
+`docs/parallelism.md` §2.5). One item deliberately left open: concurrent
+two-worker flights hit a real, confirmed, unresolved
+`offboard_control_signal_lost` reliability gap (§2.6) at a significant rate
+(~35-65%), not caused by this project's own code; a partial mitigation
+shipped, full resolution deferred to M4.
+
+M3 also found two new, real PX4-SITL-under-Gazebo-Harmonic limitations
+along the way: repeated `gz set_pose` teleports permanently trip PX4's
+compass consistency check (mitigated), and `PREFLIGHT_REBOOT_SHUTDOWN`
+(medium reset) never recovers post-flight (not usable, documented). Their
+combined effect is that **soft reset was measured to leak state** (~10x the
+run-to-run RMSE spread of hard reset) and medium reset doesn't work at all
+post-flight — so M4's throughput budget should assume **hard reset**
+(~19.8s) between episodes, not soft's ~0.6s, until one of the cheaper tiers
+is fixed. Full detail: `docs/baseline_results.md`.
 
 **Target pace:** roughly a week of active engineering to build all of
 M3-M13's code. M9's training run and M10's evaluation sweep are separate,
 unattended, wall-clock-bound jobs and are expected to run longer than that in
 the background — see the timeline note at the end of M13.
-Last revised: 2026-08-21.
+
+---
+
+**Revised 2026-09-21 — the simulator strategy changed (D12).** RL training
+moves to a GPU-parallel **NVIDIA Isaac Lab** environment; PX4-in-the-loop
+(Gazebo) stays the evaluation stack and the source of every reported number.
+This reverses D6 and supersedes D5. Rationale and architecture:
+`planning.md` §3.1 and the note on D12 in §14.
+
+What this changes here:
+
+- **New M3b** — Isaac Lab feasibility spike. Measures whether Isaac runs
+  usefully on this GPU. **Gates everything Isaac.** Do this first.
+- **New M8b** — the Isaac Lab training environment.
+- **M4 is rescoped** from a training farm to an *evaluation* farm — hundreds
+  of episodes, 2 workers, not millions of steps. Its gate on M9 moves to M3b.
+  This also defuses the open `offboard_control_signal_lost` issue.
+- **M9** trains in Isaac, evaluates on PX4, and gains the RQ5 transfer table.
+- **M5 and M6 gain one constraint each** — see those milestones.
+- **Nothing measured so far is invalidated.** The M3 noise floor, the
+  divergence band, and every multi-instance finding still stand, and the
+  ROS 2 ↔ PX4 layer is untouched.
+- **Blocked right now:** the NVIDIA kernel module (580.173.02) and NVML
+  userspace (580.178) disagree, so CUDA is unavailable. A reboot is expected
+  to fix it. M3b cannot start until it does.
+
+Last revised: 2026-09-21.
 
 ---
 
@@ -37,10 +74,14 @@ Last revised: 2026-08-21.
 
 ### The three hard milestones
 
-**M4** (parallel simulation farm), **M6** (fault injection) and **M9** (RL
-training) are where this project can stall. M4 is systems work that has already
-produced silent bugs; M6 needs C++; M9 needs patience and compute. Everything
-else is plumbing that should go smoothly. Plan time accordingly.
+**M3b** (Isaac feasibility), **M6** (fault injection) and **M8b** (Isaac
+training environment) are where this project can stall. M3b is short but is a
+genuine go/no-go on D12 — this machine is below Isaac Sim's stated minimum.
+M6 needs C++, and now needs its Isaac counterpart to match it exactly. M8b is
+where the two simulators have to agree on what an observation and a fault
+*mean*, which is subtler than either the RL or the physics. M9 itself got
+easier under D12; the risk moved into M8b and into RQ5. Everything else is
+plumbing that should go smoothly. Plan time accordingly.
 
 ---
 
@@ -66,7 +107,7 @@ random, and they are now fixed by process rather than by care.
    change is verified with **two concurrent instances** minimum.
 4. **Demand the failing test first for any bug.** "It works now" after a fix,
    with no test, means the bug returns in three milestones.
-5. **Use plan mode for M4, M6 and M9.** These have architecture decisions inside
+5. **Use plan mode for M4, M6, M8b and M9.** These have architecture decisions inside
    them. Reviewing a plan costs ten minutes; reviewing 800 lines of wrong
    parallel code costs a day.
 
@@ -113,13 +154,14 @@ review. These are settled — do not revisit them mid-build.
 | D2 | Partial rotor faults via **our own gz-sim plugin** (`RotorDegradationSystem`) |
 | D3 | Repo renamed to **`aero-safe-rl`** |
 | D4 | Evaluation includes **C5** (perfect-detector upper bound) and **C6** (detector ablation) |
-| D5 | Simplified pre-training model **deferred** — revisit only if M4 shows training is impossible |
-| D6 | **Gazebo Harmonic stays primary** for M1–M13; Isaac Sim was considered and declined (`planning.md` §14 D6) |
+| D5 | ⛔ **SUPERSEDED by D12.** Was: simplified pre-training model deferred. Now adopted as the primary training path, realised as Isaac Lab. |
+| D6 | ⛔ **SUPERSEDED by D12.** Was: Isaac Sim declined. Now partly reversed — Isaac is the *training* simulator; Gazebo remains the *evaluation* simulator and the source of every reported number. |
 | **D7** | **One drone per world, always — settled (2026-08-20).** Every worker gets its own `GZ_PARTITION`-isolated Gazebo server. The original bug was PX4 sharing a world *silently, without anyone choosing it*; the fix is simply to never let that happen. Rationale and evidence: `docs/parallelism.md` §2.3, §3, §7. |
 | **D8** | **We own the Gazebo server process** (`PX4_GZ_STANDALONE=1`), so a single worker can be stopped and restarted without touching its siblings. |
 | **D9** | **Uniform instance identity, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for all N; `target_system = N+1` always; identity read from `instance_<N>.json`, never recomputed. |
 | **D10** | **Sim time is the only clock in flight logic**, sourced from **`GzSimClock`** (`simulation/sim_clock.py`, Gazebo's native clock over gz-transport) — **not** `px4_msgs` timestamps, which were measured during M2 to track wall clock almost exactly regardless of speed factor. Wall clock is permitted solely in the watchdog. See `docs/parallelism.md` §2.5. |
 | **D11** | **Reproducibility standard is statistical, not bitwise.** PX4 SITL + gz is not bitwise deterministic across runs; we fix seeds, report distributions over ≥N runs, and *measure* run-to-run divergence rather than asserting determinism. See M3 task 6. |
+| **D12** | **Train in Isaac Lab, evaluate in PX4-in-the-loop (2026-09-21).** Supersedes D5 and D6. The two sides live in different conda environments and exchange files only — never imports (`CLAUDE.md` §0.1). Every reported number comes from the PX4 stack; Isaac produces the policy and the training curve, nothing else. Adds RQ5. Gated on M3b. |
 
 **Why D2 changed shape.** Gazebo's stock motor plugin fixes its strength at model
 load, so it cannot be changed live. PX4's `main` branch has a motor-failure
@@ -175,12 +217,14 @@ discovering its bugs underneath a training run in M9.
 | M1b | Simulator addendum: isolation + ownership | 2 d | **Medium** | D7–D10 |
 | M2 | ROS 2 talks to PX4 | 4 d | **Medium** | instance identity |
 | M3 | Autonomous mission baseline + episode contract | 1 wk | Low | episode schema |
-| M4 | **Parallel simulation farm + episode runner** | 1 wk | **High** | everything above M3 |
+| M3b | **Isaac Lab feasibility spike** ⭐ | 1 d | **High** | D12 — gates all Isaac work |
+| M4 | **Parallel evaluation farm + episode runner** | 1 wk | Medium | everything above M3 |
 | M5 | Telemetry feature pipeline | 4 d | Low | feature contract |
 | M6 | Fault injection + dataset | 1.5 wk | **High** | the farm |
 | M7 | AI fault detector | 2 wk | Medium | the dataset |
 | M8 | Rule-based recovery baseline | 1 wk | Low | policy interface |
-| M9 | RL recovery policy | 3–4 wk | **High** | everything |
+| M8b | **Isaac Lab training environment** ⭐ | 1 wk | **High** | the shared obs/action spec |
+| M9 | RL recovery policy (train Isaac, eval PX4) | 2 wk | **High** | everything |
 | M10 | Full experiments + results | 2 wk | Medium | metrics module |
 | M11 | Generalization tests | 2 wk | Low | — |
 | M12 | Hexacopter extension | 2 wk | Medium | — |
@@ -650,7 +694,7 @@ special-case instance 0.
 
 ---
 
-# M3 — Autonomous mission baseline + episode contract
+# M3 — Autonomous mission baseline + episode contract ✅
 
 **Goal:** a repeatable autonomous mission that becomes the "healthy" condition in
 every experiment, and the one episode-record format everything else reads and
@@ -742,13 +786,48 @@ tests/sim/test_reset.py         (@pytest.mark.sim)
 
 ### Done when
 
-- [ ] 20 out of 20 healthy missions complete successfully
-- [ ] Position RMSE recorded for all 20; **noise floor documented**
-- [ ] Run-to-run divergence at fixed seed quantified (task 7)
-- [ ] All three reset tiers implemented, and each one's cost measured
-- [ ] Soft reset proved equivalent to hard reset, or documented as unusable
-- [ ] Every episode record validates against the schema
-- [ ] Logs have no missing rows and no gaps in `t_sim`
+All verified 2026-08-21 against a live worker (`docs/baseline_results.md`
+has every number and both raw run directories):
+
+- [x] 20 out of 20 healthy missions complete successfully — two runs, 20/20
+      each (`m3_healthy_20` needed 2 retries out of 22 attempts, both
+      auto-recovered by escalating to hard reset and both logged rather
+      than hidden; `m3_reset_hard_20` needed zero retries)
+- [x] Position RMSE recorded for all 20; **noise floor documented** — mean
+      6.44m, std 0.57m over 40 completed episodes (`docs/baseline_results.md`
+      Task 8)
+- [x] Run-to-run divergence at fixed seed quantified (task 7) — reported per
+      reset tier since they turned out not to be interchangeable; hard
+      reset's spread (RMSE std 0.083m) is the recommended reproducibility
+      tolerance going forward
+- [x] All three reset tiers implemented, and each one's cost measured — soft
+      0.59s, medium ~0.5s *when it works*, hard 19.78s
+- [x] Soft reset proved equivalent to hard reset, or documented as unusable
+      — **not equivalent**: same mean performance, but ~10x the run-to-run
+      RMSE spread and ~58x the flight-time spread, consistent with PX4
+      controller/EKF state that soft reset's position/velocity checks
+      cannot see. Documented, not hidden — see Task 6 in
+      `docs/baseline_results.md`, including the consequence for M4's
+      throughput budget (medium is separately unusable post-flight, so M4
+      should budget from hard reset until one of the cheaper tiers is
+      fixed).
+- [x] Every episode record validates against the schema — every writer goes
+      through `EpisodeLogger`, which validates before writing; zero
+      `SchemaValidationError`s across all 42 completed-run episodes
+- [x] Logs have no missing rows and no gaps in `t_sim` — checked directly:
+      zero non-sequential `step_index` values across all 20
+      `m3_reset_hard_20` episodes, `t_sim` deltas consistent with the 10Hz
+      control rate (mean ~0.11s, max ~0.3s jitter, no discontinuities)
+
+**Also found and fixed along the way, not originally anticipated by this
+milestone's task list:** repeated `gz set_pose` teleports between episodes
+permanently trip PX4's magnetometer consistency check ("Compass 0 fault"),
+and `VEHICLE_CMD_PREFLIGHT_REBOOT_SHUTDOWN` (medium reset) never recovers
+`pre_flight_checks_pass` once a PX4 instance has actually armed and flown
+(tested to 75s). Both are real PX4-SITL-under-Gazebo-Harmonic limitations,
+not bugs in this project's own code. Full detail and mitigations in
+`docs/baseline_results.md`'s Task 5/6 sections and
+`aero_bridge/reset.py`'s module docstring.
 
 ### Verify with
 
@@ -802,19 +881,67 @@ skip validation "for speed".
 ```
 
 ---
-# M4 — Parallel simulation farm + episode runner  ⭐ new
+# M3b — Isaac Lab feasibility spike  ⭐ new (D12)
+
+**Goal:** find out by measurement whether Isaac Lab runs usefully on this
+machine, **before** any part of the plan depends on it.
+
+**Why it is a milestone and not a footnote:** Isaac Sim 5.1's stated minimum is
+an RTX 4080 / 16 GB VRAM / 32 GB RAM. This machine is an RTX 2070 Mobile
+(Turing, 8 GB) with 15 GB RAM — below spec on all three. Turing has RT cores so
+it is not excluded outright, and headless physics-only is the cheapest workload
+Isaac can be given, but that is a reason for optimism, not a number. D12 without
+this measurement is a guess, and the wrong place to discover it is M9.
+
+**Depends on:** a working CUDA install. **Blocks:** M8b, M9.
+
+**Blocked right now.** The NVIDIA kernel module (580.173.02) and NVML userspace
+(580.178) disagree: `nvidia-smi` fails and `torch.cuda.is_available()` is
+`False`. A reboot is expected to fix it. Verify with `nvidia-smi` before
+starting.
+
+**Key deliverables:**
+- Isaac Sim 5.1.0 (already pip-installed in the `isaacsim` conda env) confirmed
+  to launch **headless** and step a physics scene with no rendering.
+- Isaac Lab installed into that same env; one stock quadrotor task run.
+- A measured table: env count ∈ {64, 256, 1024, 4096} × {steps/sec, VRAM, host
+  RAM}, plus the largest env count stable for 10 minutes with no OOM.
+- `docs/isaac_feasibility.md` stating the chosen operating point.
+
+**Gate — the whole point of this milestone.** If the best stable configuration
+cannot deliver roughly 1 M environment steps in a few hours, **stop and
+revisit D12.** The options then are a cloud GPU for training runs, or reverting
+to PX4-in-the-loop training under M4's original budget. Both are acceptable;
+finding out during M9 is not.
+
+**Watch out for:** treating a successful *launch* as a successful *spike*.
+Isaac starting up proves nothing about whether it sustains thousands of envs on
+8 GB. The deliverable is the table, not a screenshot.
+
+---
+
+# M4 — Parallel evaluation farm + episode runner  ⭐ new
+
+> **Rescoped 2026-09-21 (D12).** This was a *training* farm: millions of steps,
+> 4 workers, gating whether M9 was possible. Training moved to Isaac, so this is
+> now an **evaluation** farm — hundreds of episodes per condition cell. What
+> changes: 2 workers is a reasonable default rather than 4; the M9 gate moves to
+> M3b; and the unresolved `offboard_control_signal_lost` issue
+> (`docs/parallelism.md` §2.6, ~35–65 % at two concurrent workers) becomes a
+> retry-and-record case that this milestone's `WorkerSupervisor` already handles
+> by design, instead of a threat to a multi-day training run. Still build the
+> throughput table — M10's sweep is budgeted from it — but it is no longer a
+> project-level gate. The tasks below are unchanged except in scale.
 
 **Goal:** run N independent workers, each flying episodes, for hours, unattended,
 with failures handled rather than avoided — and know the real aggregate
-throughput number that M9's budget depends on.
+throughput number that M10's evaluation sweep depends on.
 
-**Why it matters:** this is the milestone that decides whether M9 is possible.
-It is also where every bug this project has produced actually lives. Building it
-now, against the M3 mission that already works, means each failure has exactly
-one possible cause. Building it inside M9 means debugging parallelism, reward
-shaping and PPO convergence simultaneously — which is how RL projects die.
+**Why it matters:** this is where every bug this project has produced actually
+lives. Building it now, against the M3 mission that already works, means each
+failure has exactly one possible cause.
 
-**Depends on:** M1b, M2, M3. **Blocks:** M6 (dataset generation), M9 (training).
+**Depends on:** M1b, M2, M3. **Blocks:** M6 (dataset generation), M10 (sweep).
 
 **Risk: High.** Budget a week and expect to spend most of it on failure handling
 rather than on the happy path.
@@ -1023,6 +1150,22 @@ differently, they drift apart and M10's comparison becomes invalid.
 a value from after the window's end. This bug (lookahead leakage) is invisible
 and inflates every later result if it slips in.
 
+**Second non-negotiable, added 2026-09-21 (D12):** the feature set splits in
+two, and the split must be decided *here*, not at M9.
+
+| | Computable in | May feed |
+|---|---|---|
+| **Shared features** | both PX4 and Isaac | the detector **and** the policy observation |
+| **PX4-only features** | PX4 telemetry only — control-allocation residual, EKF innovations, per-motor outputs | the **detector only** |
+
+The policy observation may contain only shared features, because a policy
+trained in Isaac on an input Isaac cannot produce is a policy that cannot
+transfer. `configs/features.yaml` marks each feature with which side can
+compute it, and a unit test asserts that everything referenced by
+`configs/rl/observation_v1.yaml` is marked shared. Note this costs the policy
+nothing it actually needs: the PX4-only signals are exactly the ones the
+*detector* consumes, and the policy sees the detector's output, not its input.
+
 ---
 
 # M6 — Fault injection and dataset
@@ -1051,6 +1194,20 @@ milestone — budget accordingly.
 
 **Non-negotiable:** `~/projects/PX4-Autopilot` must have zero uncommitted
 modifications when this milestone is done.
+
+**Second non-negotiable, added 2026-09-21 (D12): the fault model now exists
+twice and must mean the same thing twice.** The Gazebo C++ plugin here, and an
+Isaac-side Python rotor model in M8b. This is the one sanctioned exception to
+"exactly one implementation" (`CLAUDE.md` §1.4), and the price of it is
+`CLAUDE.md` §1.6: a cross-validation test asserting that the same commanded
+severity `s` produces matching thrust reduction on both sides, against a
+recorded fixture.
+
+Build the Gazebo side first and record that fixture here, so M8b has something
+to match rather than the two being written to agree with each other in the
+abstract. If this test is not passing, the policy trains against one fault and
+is evaluated against a different one, and **every RQ5 number is meaningless** —
+in a way that looks exactly like an interesting transfer gap.
 
 ---
 
@@ -1096,25 +1253,70 @@ whole comparison; reviewers see through it immediately.
 
 ---
 
-# M9 — RL recovery policy
+# M8b — Isaac Lab training environment  ⭐ new (D12)
+
+**Goal:** the environment the policy actually trains in — N parallel quadrotors
+on GPU, implementing the *same* frozen observation/action spec as the
+PX4-in-the-loop evaluation environment.
+
+**Depends on:** M3b (feasibility), M5 (the shared/PX4-only feature split),
+M6 (the Gazebo fault model and its fixture), M7 (the detector's measured error
+characteristics). **Blocks:** M9.
+
+**Key deliverables:**
+- An Isaac Lab quadrotor task with a geometric position/velocity controller
+  standing in for PX4's position loop, stepped at the same **5 Hz** decision
+  rate as the evaluation env.
+- The **Isaac-side rotor degradation model**, cross-validated against M6's
+  recorded fixture (`CLAUDE.md` §1.6). This, not the RL, is the milestone's
+  real risk.
+- A **detector-output simulator**. During Isaac training the real detector
+  cannot run — it needs PX4 telemetry that does not exist on this side — so the
+  policy is fed a synthetic detector output: true severity passed through a
+  noise / latency / false-positive model *fitted to M7's measured error*.
+- One shared test asserting both environments expose spaces matching
+  `configs/rl/observation_v1.yaml`.
+
+**Non-negotiable:** the detector-output simulator is fitted to M7's real
+measured error and the fit is documented. Inventing plausible-looking noise
+instead is the quiet way to make RQ3 and RQ5 both meaningless — the policy
+would be trained against a detector that does not exist, and the transfer gap
+would then be measuring the modelling error rather than the simulator gap.
+
+**Watch out for:** Isaac making principle #12 trivially easy to violate. On
+this side the true severity is simply a variable in scope, so a stray reference
+puts ground truth into the observation with nothing to catch it. The
+observation must be assembled from the spec, never hand-packed.
+
+---
+
+# M9 — RL recovery policy (train in Isaac, evaluate on PX4)
 
 **Goal:** train a high-level policy that takes the detector's estimate and
-decides how to keep the mission alive. The core contribution, and the
-milestone most likely to consume time — which is why the design stays small
-and why M4 exists first.
+decides how to keep the mission alive. Still the core contribution — but under
+D12 the *engineering* risk has moved into M8b and the *research* risk into RQ5,
+so this milestone itself got smaller.
 
-**Depends on:** M4 (throughput budget), M7, M8. **Blocks:** M10.
+**Depends on:** M3b (sample budget), M7, M8, M8b. **Blocks:** M10.
 
-**Do not start until `docs/throughput.md` says the sample budget is reachable.**
+**Do not start until `docs/isaac_feasibility.md` says the sample budget is
+reachable.**
 
 **Key deliverables:**
 - Observation, action and reward frozen as versioned YAML **before training
   starts** — changing these mid-project silently invalidates every earlier run.
-- The Gym environment is a thin wrapper over M4's `EpisodeRunner`; it must not
-  re-implement flying, reset, or logging.
-- PPO, ≥3 seeds (one run proves nothing), domain randomisation over fault
-  severity/timing/mass/wind/noise, reward components logged separately so
-  reward hacking is visible rather than indistinguishable from learning.
+  Under D12 they must be frozen before *both* environments are finished, since
+  two environments are now reading them.
+- PPO in the `isaacsim` env, ≥3 seeds (one run proves nothing), domain
+  randomisation over fault severity/timing/mass/wind/noise **and over the
+  simulated detector's latency and error** — that last one is new and matters,
+  because it is the most overfittable part of the training signal.
+- Reward components logged separately so reward hacking is visible rather than
+  indistinguishable from learning.
+- Checkpoints stamped with the spec digest they were trained under; the
+  evaluation side refuses a mismatch (`CLAUDE.md` §0.1).
+- **The RQ5 transfer table** — each policy's performance in Isaac next to its
+  performance on the PX4 stack. This is a headline result, not a diagnostic.
 
 **Non-negotiable — protects the entire research claim:** the policy sees the
 **detector's estimate**, never the true fault state. Ground truth may shape the
@@ -1122,6 +1324,11 @@ training reward, but must never reach the observation. Actions are high-level
 only (speed/altitude/pacing/land-commit) — never a motor command. A policy that
 only ties the rule-based baseline is a legitimate, reportable finding; tuning
 until it wins is how projects lose their integrity.
+
+**Second non-negotiable (D12):** **every reported number comes from the PX4
+stack.** A policy that beats the baseline in Isaac and not on PX4 has produced
+the RQ5 result, and that is what gets reported — not a quietly retuned run. The
+only Isaac-side figure in the paper is the training curve, labelled as such.
 
 ---
 
@@ -1202,10 +1409,18 @@ result, not a disappointment.
 
 **Depends on:** M10 (M11/M12 strengthen it but don't gate it).
 
-**Key deliverables:** the manuscript around RQ1-RQ4; `docs/reproduce.md` with
+**Key deliverables:** the manuscript around RQ1-RQ5; `docs/reproduce.md` with
 complete from-clean-machine instructions (including how to pick a worker count
 on different hardware); a one-command reproduction script for the headline
 result; archived models/configs/seeds/results/manifests; a tagged release.
+
+**D12 consequence — `docs/reproduce.md` documents two separate paths.**
+Reproducing the *headline result* requires only the PX4/Gazebo stack plus the
+archived policy checkpoint: no Isaac, no NVIDIA account, no RTX GPU.
+Reproducing the *training* requires Isaac Lab and suitable hardware. Keeping
+these separate is what stops the Isaac dependency from undermining the
+"clean machine reproduces the result" goal — it was a real objection under D6
+and it is answered by this structure, not by ignoring it.
 
 **Done when:** a clean machine reproduces the headline result following
 `docs/reproduce.md` alone, and every number in the paper traces back to a file
@@ -1213,7 +1428,7 @@ in `results/`.
 
 ---
 
-*(M5-M13 above are intentionally stubs — goal, key deliverables, and the
+*(M5-M13 above, including M8b, are intentionally stubs — goal, key deliverables, and the
 non-negotiables worth remembering, not a full task/test/prompt breakdown. That
 detail gets written when each milestone actually starts, informed by whatever
 M3/M4 and everything since have actually taught us by then. Writing exhaustive
@@ -1239,9 +1454,11 @@ numbers, since it can't be written before the results it describes exist.)*
 
 A web dashboard was considered as an optional parallel track (not required by
 any research result). Cut to keep the project's surface area small — revisit
-only if actually wanted, and design it then. Isaac Sim was considered and
-declined entirely (`planning.md` §14 D6) — Gazebo is the only simulator in
-this plan.
+only if actually wanted, and design it then.
+
+*(Isaac Sim was previously listed here as declined. That is no longer true —
+see D12. Isaac Lab is the training simulator as of 2026-09-21; Gazebo remains
+the evaluation simulator.)*
 
 ---
 
@@ -1255,13 +1472,15 @@ Update this as milestones complete.
 | M1 | Done | 2026-08-20 | `sim_start.sh`/`sim_stop.sh` working; RTF ≈ requested up to 8×, plateaus ~8.3× (compute-bound, not a stability limit); two concurrent instances started cleanly. Numbers in `docs/simulation_notes.md`. **Superseded finding:** the "one shared Gazebo process" behaviour it documents is the default but is the wrong architecture — see M1b and `docs/parallelism.md`. |
 | M1b | **Done** | 2026-08-20 | `simulation/instance_spec.py` is now the single source of instance identity (41 unit tests, 0.04 s, no simulator). `sim_start.sh` rewritten: own Gazebo server per worker via `GZ_PARTITION` + `PX4_GZ_STANDALONE`, `setsid` process groups, topic-based readiness, `instance_<N>.json` handshake. `sim_stop.sh` is PID-based per worker; the name-based sweep moved behind `--sweep`. New `sim_status.sh` and `activate.sh`. Verified with two concurrent workers holding independent speed factors, isolated shutdown, and a deliberate failure injection. Also found and fixed a fourth silent multi-instance trap: PX4's shell client only honours `--instance N` as `argv[1]` (`main.cpp:154`), so `px4-param set X 0 --instance 1` silently configures instance 0 and reports success — it had shipped in `fly_demo.py` and briefly in `sim_start.sh`, with the symptom "instance 1 arms but never takes off". Now guarded by a static scan (`tests/test_px4_cli_usage.py`) and `NAV_DLL_ACT` is read back after writing. Added `scripts/watch_worlds.sh`: N isolated worlds, one GUI window each, all drones flown concurrently. |
 | M2 | **Substantially done** | 2026-08-21 | `PX4Interface` made instance-aware, fixing the two known bugs (hardcoded `target_system=1`, hardcoded `/fmu/out/...`), each with a bug-catching test. Added `PX4Clock`, `arming_sequence.py` (arm/hold/land primitives, typed exceptions), and `simulation/sim_clock.py` (`GzSimClock`). **Major correction found during implementation**: `px4_msgs` timestamps are NOT simulated time — they track wall clock regardless of speed factor (`uxrce_dds_client` resync); `GzSimClock` reads Gazebo's clock directly instead. **One item deliberately left open**: concurrent two-worker flights hit a real, confirmed `offboard_control_signal_lost` failure at ~35-65% (vs ~10-20% solo) — extensively investigated via `.ulg` log analysis and loop instrumentation; battery failsafe and `GzSimClock`'s background thread were tested and ruled out as causes; the loss occurs in the BEST_EFFORT transport, not application code. A partial mitigation (offboard re-engage on loss) roughly halves the failure rate. Full writeup and open status: `docs/parallelism.md` §2.6. 87 unit tests, all passing, 3s. |
-| M3 | Not started | | Now also owns the episode record schema and the reset ladder. |
-| M4 | Not started | | **New milestone**: parallel simulation farm + episode runner. Gates M6 and M9. |
+| M3 | **Done** | 2026-08-21 | *(This row previously read "Not started", which was stale — the milestone's own checkboxes, its ✅ header and `docs/baseline_results.md` all recorded it as complete. Corrected 2026-09-21.)* 20/20 healthy missions over two runs. **Noise floor: position RMSE 6.44 ± 0.57 m** over 40 episodes. **Divergence band at fixed seed: σ = 0.083 m RMSE** following hard reset — this is the project's reproducibility tolerance (D11). Episode schema frozen and validated on every write. Two new PX4-under-Gazebo limitations found: repeated `gz set_pose` teleports permanently trip the compass consistency check, and `PREFLIGHT_REBOOT_SHUTDOWN` (medium reset) never recovers post-flight. Net effect: **soft reset measurably leaks state** (~10× hard reset's spread) and medium reset is unusable, so budget **hard reset (~19.8 s)** between episodes. Full detail: `docs/baseline_results.md`. |
+| M3b | Not started | | **New milestone (D12)**: Isaac Lab feasibility spike. **Gates all Isaac work.** Blocked until a reboot clears the NVIDIA kernel-module/NVML mismatch. |
+| M4 | Not started | | **Rescoped 2026-09-21 (D12)**: now a parallel *evaluation* farm, not a training farm. Gates M6 and M10; the M9 gate moved to M3b. |
 | M5 | Not started | | Was M4. |
 | M6 | Not started | | Was M5. |
 | M7 | Not started | | Was M6. |
 | M8 | Not started | | Was M7. |
-| M9 | Not started | | Was M8. |
+| M8b | Not started | | **New milestone (D12)**: Isaac Lab training environment. Depends on M3b, M5, M6, M7. |
+| M9 | Not started | | Was M8. Rescoped by D12: trains in Isaac, evaluates on PX4, adds the RQ5 transfer table. |
 | M10 | Not started | | Was M9. |
 | M11 | Not started | | Was M10. |
 | M12 | Not started | | Was M11. |

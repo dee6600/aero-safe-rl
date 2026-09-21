@@ -71,6 +71,7 @@ so the comparison isolates the actual contribution. Full reasoning in
 | **RQ2** — Recovery | Given a fault estimate, does a learned high-level policy outperform a hand-tuned rule-based policy on mission success and safety? |
 | **RQ3** — Coupling | How sensitive is recovery performance to detection latency and false positives — is the combination more than the sum of its parts? |
 | **RQ4** — Generalization | Does the policy transfer to unseen fault severities, timings, wind, and vehicle parameters? |
+| **RQ5** — Sim-to-sim transfer | Does a high-level recovery policy trained in a massively-parallel *reduced-order* simulator transfer to a full autopilot-in-the-loop stack, and what is lost in the crossing? |
 
 ## Architecture
 
@@ -123,11 +124,14 @@ node could talk to a real PX4 flight controller unchanged.
 
 ## 🚧 Project status
 
-**M0–M2 done.** M2 has one open item — a real, confirmed, currently
+**M0–M3 done.** M2 has one open item — a real, confirmed, currently
 unresolved DDS transport reliability gap under concurrent worker load, not
 caused by this project's own code (full writeup:
-[`docs/parallelism.md`](docs/parallelism.md) §2.6). M3 (autonomous mission
-baseline) is next. See [`milestones.md`](milestones.md) for the full
+[`docs/parallelism.md`](docs/parallelism.md) §2.6). M3 established the
+project's noise floor (position RMSE **6.44 ± 0.57 m**) and its reproducibility
+tolerance (**σ = 0.083 m** at fixed seed after hard reset) — see
+[`docs/baseline_results.md`](docs/baseline_results.md). **M3b (Isaac Lab
+feasibility) is next.** See [`milestones.md`](milestones.md) for the full
 task-by-task build log and [`docs/`](docs/) for measured numbers.
 
 | # | Milestone | Status |
@@ -136,13 +140,15 @@ task-by-task build log and [`docs/`](docs/) for measured numbers.
 | M1 | PX4 + Gazebo simulator running | ✅ Done |
 | M1b | Worker isolation, ownership, identity | ✅ Done |
 | M2 | ROS 2 talks to PX4 | ✅ Done (one open reliability item, §2.6) |
-| M3 | Autonomous mission baseline + episode contract | ⬜ Not started |
-| M4 | **Parallel simulation farm + episode runner** | ⬜ Not started |
+| M3 | Autonomous mission baseline + episode contract | ✅ Done |
+| M3b | **Isaac Lab feasibility spike** | ⬜ Not started — gates all Isaac work |
+| M4 | **Parallel evaluation farm + episode runner** | ⬜ Not started |
 | M5 | Telemetry feature pipeline | ⬜ Not started |
 | M6 | Fault injection + dataset | ⬜ Not started |
 | M7 | AI fault detector | ⬜ Not started |
 | M8 | Rule-based recovery baseline | ⬜ Not started |
-| M9 | RL recovery policy | ⬜ Not started |
+| M8b | **Isaac Lab training environment** | ⬜ Not started |
+| M9 | RL recovery policy (train Isaac, eval PX4) | ⬜ Not started |
 | M10 | Full experiments + results | ⬜ Not started |
 | M11 | Generalization tests | ⬜ Not started |
 | M12 | Hexacopter extension | ⬜ Not started |
@@ -154,6 +160,17 @@ task-by-task build log and [`docs/`](docs/) for measured numbers.
 > training is feasible at all, so it now has its own acceptance criteria instead
 > of living inside the RL milestone. Mapping table in
 > [`milestones.md`](milestones.md).
+
+> **Simulator strategy changed 2026-09-21 (D12).** RL training moves to a
+> GPU-parallel **NVIDIA Isaac Lab** environment; PX4 + Gazebo remains the
+> evaluation stack and the source of **every reported number**. This removes
+> the project's largest risk (sample budget: PX4-in-the-loop training would
+> have taken days per run) and adds RQ5, which measures the resulting
+> sim-to-sim gap rather than assuming it away. Two milestones were added,
+> **M3b** (feasibility — this machine is below Isaac Sim's stated minimum, so
+> it is measured before anything depends on it) and **M8b** (the training
+> environment). Nothing already measured is invalidated. Full rationale:
+> [`planning.md` §3.1](planning.md).
 
 <details>
 <summary><b>What's actually been verified so far</b></summary>
@@ -275,13 +292,14 @@ detector that spots a weakening motor PX4 itself never notices.
 | D2 | Partial rotor faults via **our own gz-sim plugin**, not PX4's binary-only failure command |
 | D3 | Repo named **`aero-safe-rl`** |
 | D4 | Evaluation includes an oracle-detector upper bound and a detector-ablation condition |
-| D5 | Simplified pre-training model **deferred** unless full-stack training proves infeasible |
-| D6 | **Gazebo stays primary** for all research milestones; Isaac Sim was considered and declined |
+| ~~D5~~ | ~~Simplified pre-training model **deferred**~~ — **superseded by D12** |
+| ~~D6~~ | ~~Isaac Sim considered and **declined**~~ — **superseded by D12** |
 | D7 | **One drone per world**, `GZ_PARTITION`-isolated; silent, unchosen sharing stays prohibited |
 | D8 | **We own the Gazebo server process** so a single worker can be restarted without touching its siblings |
 | D9 | **Uniform instance identity**, no special case for instance 0; derived once and published as a file |
 | D10 | **Sim time is the only clock** in flight logic, from `GzSimClock` (Gazebo's own clock) — not `px4_msgs` timestamps, which track wall clock regardless of speed factor; wall clock only in the hang watchdog |
 | D11 | **Reproducibility is statistical, not bitwise** — pure functions are exact, whole-pipeline results reproduce within a measured band |
+| **D12** | **Train in Isaac Lab, evaluate in PX4-in-the-loop** (2026-09-21) — supersedes D5 and D6. GPU-parallel training removes the sample-budget risk; every *reported* number still comes from the real autopilot stack. Adds RQ5. |
 
 Full reasoning for each: [`planning.md` §14](planning.md#14-decisions--all-approved-2026-08-14).
 

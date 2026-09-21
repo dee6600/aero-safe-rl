@@ -9,7 +9,13 @@ reproduces only under parallelism, or only appears three milestones later.
 
 ---
 
-## 0. Shell setup — every session, every terminal
+## 0. Shell setup — every session, every command
+
+This project has **two** conda environments. They are not interchangeable and
+they never import each other (§0.1).
+
+**`aero-safe-rl`** — PX4, Gazebo, ROS 2, the detector, evaluation, everything
+that produces a reported number:
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate aero-safe-rl
@@ -21,9 +27,40 @@ Order matters. Conda supplies the interpreter (3.10.20) and the ML stack; ROS
 supplies `rclpy` from `/opt/ros/humble` on `PYTHONPATH`. Both are Python 3.10,
 so the C-extension ABI matches. Verified working with numpy 2.2.6.
 
-`scripts/activate.sh` should do exactly this and nothing else. If a script or
-test fails with `No module named rclpy` or `No module named torch`, you sourced
-one of the two and not the other.
+**`isaacsim`** — Isaac Sim 5.1.0 + Isaac Lab, RL training only:
+
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate isaacsim
+```
+
+Python 3.11, torch 2.7.0. Do **not** source ROS into this environment: ROS
+Humble's Python is 3.10 and putting it on `PYTHONPATH` next to a 3.11
+interpreter produces C-extension ABI errors that look like corrupt installs.
+
+**Source the environment as part of every command, not once per session.**
+Each shell invocation starts clean, so a command run without it silently uses
+system Python. The symptom is `No module named rclpy` / `No module named
+torch`, which reads like a broken install and is not one.
+`scripts/activate.sh` wraps the `aero-safe-rl` case.
+
+### 0.1 The environment boundary — never cross it in code
+
+The two environments exchange **files, never imports**. Nothing under
+`isaac/` may import `aero_bridge`, `simulation/`, or anything that pulls in
+`rclpy`; nothing in the ROS 2 side may import `isaacsim` or `isaaclab`.
+
+The entire interface is three artifacts, all versioned per §7:
+
+| Artifact | Written by | Read by |
+|---|---|---|
+| `configs/rl/observation_v1.yaml`, `action_v1.yaml` | frozen by hand before training | both sides |
+| frozen normalisation statistics | `aero-safe-rl` (from healthy flights) | both sides |
+| policy checkpoint (`.pt`, weights + spec digest) | `isaacsim` (training) | `aero-safe-rl` (evaluation) |
+
+A checkpoint records the digest of the specs it was trained under, and the
+evaluation side refuses to load one whose digest does not match. That check is
+the only thing standing between "the policy transferred" and "the two sides
+quietly disagreed about what dimension 12 means".
 
 ---
 
@@ -40,7 +77,21 @@ one of the two and not the other.
 4. **Never introduce a second implementation of something that already exists.**
    Feature extraction, metrics, the PX4 interface, and the episode record schema
    each have exactly one implementation. Import it; do not re-derive it.
+   **The one sanctioned exception is the rotor-degradation fault model**, which
+   necessarily exists twice — a C++ gz-sim plugin on the Gazebo side and a
+   Python rotor model on the Isaac side, because the two simulators share no
+   physics code. That exception is paid for in §1.6, not waived.
 5. **Never write flight logic that special-cases instance 0.** See §2.
+6. **Never let the two fault implementations drift.** They are one contract
+   with two backends. A severity `s` commanded on either side must mean the
+   same physical thing, and a test asserts the two produce matching thrust
+   reduction for the same `s` against a recorded fixture. If that test is not
+   passing, no transfer result from this project means anything — the policy
+   would have trained against one fault and been evaluated against another.
+7. **Never use ground-truth fault state as a policy input**, on either side of
+   the environment boundary. It may shape the training reward only. Isaac makes
+   this easy to violate, because there the true severity is simply a variable
+   in scope.
 
 ---
 
@@ -143,6 +194,13 @@ between debugging (1×) and training (4–8×).
 - Wall clock is allowed for exactly one thing: the **watchdog** that decides a
   worker is hung. That one *must* be wall-clock, and must be generous enough to
   survive a 1× run.
+- **On the Isaac side none of this applies, and that is the point.** Isaac Lab
+  is stepped synchronously by the training loop, so simulated time is exactly
+  `step_count × dt` and there is no clock to read, no speed factor and no
+  possibility of drift. Do not port `GzSimClock` across the boundary; do
+  assert that the Isaac env's `dt` matches the PX4 side's control period, since
+  a policy trained at one decision rate and evaluated at another fails for
+  reasons that look like a transfer gap and are not.
 - Every episode carries both `t_sim` and `t_wall` in its record so the two can
   never be confused after the fact.
 
@@ -243,6 +301,14 @@ asserts that written records validate against the schema.
     queried instead.
 15. Appending results from several workers to one file.
 16. `np.random` global state instead of a seeded `Generator` passed explicitly.
+17. Importing across the environment boundary — anything under `isaac/` that
+    reaches for `rclpy`, `px4_msgs` or `aero_bridge`, or vice versa. §0.1.
+18. Putting a feature in the **policy observation** that only one simulator can
+    compute. Detector-only features are fine; policy inputs must exist on both
+    sides or the policy cannot transfer.
+19. Reporting a headline number measured in Isaac. Isaac is where the policy is
+    *trained*; every number in the paper comes from the PX4-in-the-loop stack.
+    The one exception is the training curve itself, labelled as such.
 
 ---
 
@@ -255,6 +321,8 @@ Before you say a task is complete:
 - [ ] Anything touching the simulator was run with **at least two concurrent
       instances**, not one.
 - [ ] No new literal topic strings, sleeps, or unbounded loops (§8).
+- [ ] No import crosses the environment boundary (§0.1), and any change to the
+      observation/action spec was made on **both** sides plus its version bumped.
 - [ ] `scripts/sim_stop.sh --all` leaves zero `px4` / `gz sim` /
       `MicroXRCEAgent` processes.
 - [ ] `milestones.md`'s progress log and checkboxes updated.

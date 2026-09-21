@@ -1,0 +1,41 @@
+# M3's one primary mission: a square circuit at fixed altitude. Every
+# fault-injected result from M6 onward is measured against how this mission
+# flies when nothing is wrong -- this file, not code, is where its shape
+# lives (milestones.md M3 task 3: acceptance radius, hold times, geofence
+# and altitude limits belong in config, not in mission_executor.py).
+
+mission_id: square_circuit
+schema_version: "1"
+
+description: >
+  Takeoff to 5m, fly a ~15m x 15m square (four corners plus the return to
+  the start) holding briefly at each corner, then hover at the start point
+  before landing. About 60-90s of flight at speed factor 1x.
+
+altitude_m: 5.0             # hover/cruise altitude above the spawn point (AGL)
+acceptance_radius_m: 0.75    # a waypoint counts as reached within this distance
+hold_time_s: 2.0              # time to hold at each waypoint before advancing
+final_hover_s: 3.0             # hover time at the last waypoint before landing
+timeout_s: 120.0                 # sim-time budget for the whole mission (arm to land)
+
+# Local NED-frame offsets (x=north, y=east) from the spawn point, in metres,
+# flown in order. Every worker spawns at its own world's origin (InstanceSpec
+# D7: one drone per world), so this same list is correct for every instance.
+waypoints:
+  - [0.0, 0.0]
+  - [15.0, 0.0]
+  - [15.0, 15.0]
+  - [0.0, 15.0]
+  - [0.0, 0.0]
+
+# Axis-aligned box in the same local frame as waypoints. Every waypoint must
+# fall inside it with margin -- tests/test_mission_config.py checks this so
+# a typo here (a waypoint outside its own geofence) fails loudly at test
+# time rather than mid-flight.
+geofence:
+  x_min_m: -5.0
+  x_max_m: 20.0
+  y_min_m: -5.0
+  y_max_m: 20.0
+  z_min_m: -10.0   # NED: negative-more is up, so this is the ceiling (10m AGL)
+  z_max_m: -0.5    # NED: floor, just above the ground

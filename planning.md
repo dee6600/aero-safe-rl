@@ -2,8 +2,16 @@
 
 **Planning document — roadmap only. No implementation.**
 
-Status: Phases 0–1 done. Toolchain pinned and verified (Phase 0); headless
-SITL scripted and RTF measured (Phase 1). Phase 2 (ROS 2 ↔ PX4) in progress.
+Status: Phases 0–1, 1b and 3 done; Phase 2 substantially done with one open
+reliability item (`docs/parallelism.md` §2.6). Phase 4 next.
+
+**Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
+GPU-parallel **NVIDIA Isaac Lab** environment; PX4-in-the-loop (Gazebo) remains
+the evaluation stack and the source of every reported number. This reverses
+**D6** and supersedes **D5**; the new decision is **D12** (§14). It adds
+**RQ5** (§2) and a thirteenth development principle (§4). Nothing measured so
+far is invalidated — the Phase 3 noise floor, the divergence band and the
+multi-instance findings all still stand, and the ROS 2 ↔ PX4 layer is untouched.
 
 **Revised 2026-08-20** after a multi-instance review that read the pinned PX4
 source and ran two instances side by side. It found four structural problems in
@@ -15,7 +23,7 @@ Evidence: `docs/parallelism.md`. Coding rules: `CLAUDE.md`.
 
 Companion documents: `milestones.md` (build order), `CLAUDE.md` (coding rules),
 `docs/parallelism.md` (verified multi-instance behaviour).
-Last updated: 2026-08-20
+Last updated: 2026-09-21
 
 ---
 
@@ -100,6 +108,9 @@ Sub-questions the experiment design must be able to answer:
   latency and false positives? (i.e. is the *combination* more than the sum?)
 - **RQ4 (Generalization)** — Does the policy transfer to unseen fault
   severities, timings, wind, and vehicle parameters?
+- **RQ5 (Sim-to-sim transfer)** — Does a high-level recovery policy trained in
+  a massively-parallel *reduced-order* simulator transfer to a full
+  autopilot-in-the-loop stack, and what is lost in the crossing? (§3.1, D12)
 
 ### Framing the novelty honestly
 
@@ -117,9 +128,21 @@ and hard to defend. The defensible contribution is at a **different layer**:
 3. **The detection–recovery coupling (RQ3)** — studying how detector latency
    and error propagate into closed-loop recovery outcomes. This is the most
    publishable angle and is under-studied.
+4. **Honest sim-to-sim accounting (RQ5)** — a great deal of published drone RL
+   is trained in a GPU-parallel reduced-order simulator and evaluated in that
+   same simulator, leaving the transfer question unasked. Training in Isaac Lab
+   and reporting *only* PX4-in-the-loop numbers turns that unasked question
+   into a measured one. The gap we report is a contribution, not an apology.
 
 Keep the low-level controller fixed (PX4) in all conditions so the comparison
 isolates the contribution.
+
+**Why this survives the simulator change.** Points 1–3 all depend on PX4 being
+in the loop — the sub-threshold framing is defined against *PX4's* detector,
+and the hardware-transferability claim rests on the policy speaking PX4's
+command interface. That is precisely why evaluation stays on PX4 and only
+training moves (D12). A version of this project that trained *and* evaluated in
+Isaac would forfeit all three.
 
 ---
 
@@ -166,6 +189,59 @@ isolates the contribution.
 The RL policy's action is a **desired high-level command**, never a motor
 command. This is what makes the design hardware-transferable: the same
 ROS 2 node could publish to a real PX4 over the same interface.
+
+### 3.1 Two simulators, one policy (D12)
+
+Training and evaluation run in different simulators, on purpose.
+
+```
+        TRAIN                                 EVALUATE  /  REPORT
+┌───────────────────────────┐        ┌────────────────────────────────┐
+│ Isaac Lab (env: isaacsim) │        │ PX4 SITL + Gazebo (aero-safe-rl)│
+│ N parallel quadrotors,GPU │        │ the real autopilot, 8.3× RTF    │
+│ reduced-order dynamics +  │        │ the stack Phases 1–4 already    │
+│ geometric position ctrl   │        │ built, entirely unchanged       │
+│ PPO, millions of steps    │        │ hundreds of episodes            │
+└─────────────┬─────────────┘        └───────────────▲────────────────┘
+              │                                       │
+              └──── policy.pt + obs/action spec ──────┘
+                    + frozen normalisation stats
+                    (files only — never a shared import)
+```
+
+**Why.** The project's own §7.4 names sample budget as risk #1: PX4-in-the-loop
+gives roughly 8× real-time on 3–4 workers, which makes 1–3 M steps a multi-day
+job and a single bad hyperparameter an expensive mistake. A GPU-parallel
+reduced-order environment removes that constraint outright. Meanwhile
+evaluation needs fidelity, not volume — a few hundred episodes per cell — which
+is exactly what the existing stack is good at.
+
+**What makes it plausible.** The action space is high-level (velocity scale,
+altitude offset, mission pacing, land-commit) at 5 Hz, and the thing that
+differs most between the two simulators is the low-level controller we
+deliberately never touch. A motor-level policy would have no chance of
+crossing this gap; a mission-level one has a real one. That is an argument, not
+a guarantee — **RQ5 exists to measure it rather than assume it.**
+
+**The two constraints this imposes**, both of which must hold from the start
+rather than be discovered at training time:
+
+1. **The policy observation must be computable in both simulators.** Anything
+   PX4-specific — control-allocation residual, EKF innovations — may feed the
+   *detector*, which runs only on the PX4 side, but may not enter the policy's
+   observation vector. `configs/rl/observation_v1.yaml` is where this is
+   enforced, and a test checks both sides produce the same dimensions.
+2. **The fault model exists twice and must mean the same thing twice.** A C++
+   gz-sim plugin and an Isaac-side Python rotor model, validated against each
+   other for matching thrust reduction at matched severity. This is the one
+   sanctioned exception to "exactly one implementation" (`CLAUDE.md` §1.4),
+   and §1.6 is the price of it.
+
+**If RQ5 comes out badly** — the policy trains well in Isaac and transfers
+poorly — that is a reportable result, not a failed project, and it is a more
+interesting one than most papers in this area publish. The fallback is
+PX4-in-the-loop fine-tuning of an Isaac-pretrained policy, which is the
+original D5 proposal and is now cheap because the pretraining already happened.
 
 ### The worker — the unit everything is built from
 
@@ -246,6 +322,11 @@ under `results/`, one writer per file.
     dies repeatedly. Crashes are not uniformly distributed across fault
     severities, so silently dropping failed episodes biases exactly the
     comparison the paper depends on.
+13. **Every reported number comes from the PX4-in-the-loop stack.** Isaac is
+    where the policy is trained, never where a result is measured. The single
+    exception is the training curve, which is labelled as an Isaac-side
+    diagnostic. The two environments exchange files and never import each
+    other (`CLAUDE.md` §0.1).
 
 ---
 
@@ -413,8 +494,50 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
 
 ---
 
-### Phase 4 — Parallel simulation farm
-**Effort: ~1 week — this phase decides whether Phase 9 is possible**
+### Phase 3b — Isaac Lab feasibility spike
+**Effort: ~1 day — added 2026-09-21; gates everything D12 depends on**
+
+- **Goal** — Find out, by measurement, whether Isaac Lab runs usefully on this
+  machine before any part of the plan is built on the assumption that it does.
+- **Why it is a phase** — Isaac Sim 5.1's stated minimum is an RTX 4080 / 16 GB
+  VRAM / 32 GB RAM; this machine is an RTX 2070 Mobile (Turing, 8 GB) with
+  15 GB RAM. Turing has RT cores so it is not excluded outright, and a headless
+  physics-only workload is far cheaper than the full application — but "far
+  cheaper" is not a number. D12 without this measurement is a guess.
+- **Deliverables**
+  - Isaac Sim 5.1.0 (already pip-installed in the `isaacsim` env) confirmed to
+    launch **headless**, with no rendering, and step a physics scene.
+  - Isaac Lab installed, and one stock quadrotor task run.
+  - **Measured table**: environment count ∈ {64, 256, 1024, 4096} × {steps per
+    second, VRAM used, host RAM used}, and the largest env count that is stable
+    for 10 minutes without an OOM.
+  - Written to `docs/isaac_feasibility.md` with the chosen operating point.
+- **Prerequisite** — CUDA works. As of 2026-09-21 it does not: the NVIDIA
+  kernel module (580.173.02) and NVML userspace (580.178) disagree, so
+  `nvidia-smi` fails and `torch.cuda.is_available()` is `False`. A reboot is
+  expected to resolve it; nothing here can be attempted until it does.
+- **Validation / gate** — If the best stable configuration cannot deliver
+  roughly 1 M environment steps within a few hours, **stop and reconsider D12
+  before building Phase 8b.** The options at that point are a cloud GPU for
+  training runs, or reverting to PX4-in-the-loop training under the old Phase 4
+  budget. Either is fine; discovering it at Phase 9 is not.
+
+---
+
+### Phase 4 — Parallel evaluation farm
+**Effort: ~1 week — rescoped by D12; see the note below**
+
+> **Rescoped 2026-09-21.** This phase was originally sized as a *training*
+> farm — millions of steps, 4 workers, with a gate deciding whether Phase 9 was
+> possible at all. Under D12 training moved to Isaac, so this is now an
+> **evaluation** farm: hundreds of episodes per condition cell, not millions of
+> steps. Consequences: 2 workers is a reasonable default instead of 4; the
+> Phase 9 throughput gate moves to Phase 3b; and the unresolved
+> `offboard_control_signal_lost` issue (`docs/parallelism.md` §2.6, ~35–65 % at
+> two concurrent workers) becomes a retry-and-record case that this phase's
+> `WorkerSupervisor` already handles by design, rather than a threat to a
+> multi-day training run. The throughput table is still worth producing — the
+> evaluation sweep is budgeted from it — but it is no longer a project gate.
 
 - **Goal** — N independent workers flying episodes unattended for hours, with
   failures handled rather than avoided, and a measured aggregate throughput
@@ -548,30 +671,63 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
 
 ---
 
-### Phase 9 — High-level RL fault recovery
-**Effort: ~3–4 weeks — highest risk phase**
+### Phase 8b — Isaac Lab training environment
+**Effort: ~1 week — added 2026-09-21 (D12)**
 
-- **Goal** — An RL policy that consumes the fault estimate and outputs high-level commands, trained in the PX4-in-the-loop environment.
+- **Goal** — The environment the policy trains in: N parallel quadrotors on
+  GPU, implementing the *same* frozen observation/action spec as the
+  PX4-in-the-loop evaluation environment.
 - **Deliverables**
-  - Gymnasium environment wrapping the full stack (§7.1).
-  - Observation, action, and reward specification frozen and documented before training starts (§7.2–7.3).
+  - An Isaac Lab task: quadrotor with a geometric position/velocity controller
+    standing in for PX4's position loop, stepped at the same 5 Hz decision rate.
+  - The **Isaac-side rotor degradation model**, matching the Gazebo plugin's
+    severity semantics, with a cross-validation test against a recorded fixture
+    (`CLAUDE.md` §1.6). This is the milestone's real risk, not the RL part.
+  - A **detector-output stub** in the observation: during Isaac training the
+    policy cannot run the real detector (which needs PX4 telemetry), so it is
+    fed a *simulated* detector output — true severity passed through a
+    calibrated noise/latency/false-positive model fitted to the Phase 7
+    detector's measured error characteristics. This is the honest way to keep
+    principle #12 (no ground truth as input) while training off-stack, and the
+    fit must be documented, since RQ3 and RQ5 both lean on it.
+  - Both environments asserted against `observation_v1.yaml` by one shared test.
+- **Precondition** — Phase 3b's measurement, Phase 7's detector error model.
+- **Validation** — The two environments agree dimension-for-dimension on the
+  observation spec; a hand-written scripted policy (e.g. "always slow down")
+  produces qualitatively similar outcomes in both; the fault model matches.
+
+---
+
+### Phase 9 — High-level RL fault recovery
+**Effort: ~2 weeks — reduced by D12; risk moved to Phase 8b and RQ5**
+
+- **Goal** — An RL policy that consumes the fault estimate and outputs
+  high-level commands, **trained in Isaac Lab (Phase 8b) and evaluated in the
+  PX4-in-the-loop stack**.
+- **Deliverables**
   - Observation, action and reward specs frozen as versioned YAML **before the
-    first training run**, with a test asserting the environment's spaces match.
-  - A Gymnasium environment that is a thin wrapper over Phase 4's
-    `EpisodeRunner` — it must not re-implement flying, reset or logging.
-  - PPO training pipeline over the Phase 4 farm, checkpointing, resumable,
+    first training run**, with a test asserting *both* environments' spaces match.
+  - PPO training pipeline in the `isaacsim` env, checkpointing, resumable,
     TensorBoard logging with **reward components logged separately** so reward
     hacking is visible rather than indistinguishable from learning.
-  - Domain randomisation over fault severity, onset, mass/inertia, wind, sensor noise.
-  - Trained policy checkpoints + training curves, ≥3 seeds.
-- **Tech** — Stable-Baselines3 PPO, `SubprocVecEnv` (start method `spawn`,
-  `rclpy.init()` only inside workers), PyTorch, CUDA.
-- **Precondition** — `docs/throughput.md` exists and shows the sample budget is
-  reachable. Budget from that measurement, never from an assumption.
-- **Validation** — Policy exceeds the Phase 8 rule-based baseline on mission
-  success rate and crash rate at matched fault severities, with non-overlapping
-  confidence intervals across ≥3 training seeds. **A policy that merely
-  ties the baseline is a legitimate finding — report it rather than tuning until it wins.**
+  - Domain randomisation over fault severity, onset, mass/inertia, wind, sensor
+    noise — and, newly important under D12, over the *simulated detector's*
+    latency and error, since that is the main thing the policy could overfit to.
+  - Trained policy checkpoints + training curves, ≥3 seeds. Checkpoints record
+    the spec digest they were trained under (`CLAUDE.md` §0.1).
+  - **The RQ5 transfer table**: each policy's performance in Isaac and on the
+    PX4 stack, side by side. The gap is a headline result of this project.
+- **Tech** — Isaac Lab + PPO (`rsl_rl` or `skrl`), PyTorch, CUDA. Note this
+  replaces the previous Stable-Baselines3 `SubprocVecEnv` plan, which existed
+  only to parallelise PX4 workers and has no purpose now.
+- **Precondition** — `docs/isaac_feasibility.md` (Phase 3b) shows the sample
+  budget is reachable. Budget from that measurement, never from an assumption.
+- **Validation** — Policy exceeds the Phase 8 rule-based baseline **on the PX4
+  stack** on mission success rate and crash rate at matched fault severities,
+  with non-overlapping confidence intervals across ≥3 training seeds. **A policy
+  that merely ties the baseline is a legitimate finding — report it rather than
+  tuning until it wins.** A policy that beats it in Isaac and not on PX4 is the
+  RQ5 result and is reported as such, not quietly retuned.
 
 ---
 
@@ -669,9 +825,29 @@ the detector, environment, or evaluation code.
 ## 7. RL strategy
 
 ### 7.1 Environment
-A Gymnasium `Env` wrapping PX4 SITL + Gazebo + the ROS 2 pipeline. Step rate
-**5 Hz**. Episodes: 60–90 s of simulated time, terminated early on crash,
-geofence breach, landing, or mission completion.
+
+**Two environments implementing one spec.** Step rate **5 Hz** and episodes of
+60–90 s simulated time in both, terminated early on crash, geofence breach,
+landing, or mission completion.
+
+| | Training env | Evaluation env |
+|---|---|---|
+| Backend | Isaac Lab, N parallel quadrotors on GPU | PX4 SITL + Gazebo + ROS 2 |
+| Conda env | `isaacsim` (py3.11) | `aero-safe-rl` (py3.10) |
+| Low-level control | geometric position/velocity controller | PX4 (EKF2, allocation, rate loops) |
+| Built on | new, Phase 8b | a thin wrapper over Phase 4's `EpisodeRunner` |
+| Used for | PPO training only | every reported number |
+
+The evaluation env must not re-implement flying, reset or logging — it wraps
+`EpisodeRunner`. The training env is necessarily a separate implementation and
+is the reason `CLAUDE.md` §0.1 exists.
+
+**The specs are frozen once and shared.** `configs/rl/observation_v1.yaml` and
+`action_v1.yaml` are authored before either environment is built, and a test
+asserts both environments expose spaces matching them. Two environments that
+disagree about the observation layout produce a policy that appears to train
+and then behaves randomly at evaluation — and it looks exactly like a
+sim-to-sim transfer failure, which is how it would be misdiagnosed.
 
 ### 7.2 Observation, action, reward
 
@@ -715,9 +891,35 @@ wall-clock cost and it is far more sensitive to tuning.
 Add SAC **only** if PPO fails to learn after a genuine tuning effort, and report
 it as an ablation rather than swapping silently.
 
-### 7.4 Sample budget — the project's main risk
+### 7.4 Sample budget — resolved by D12, at the cost of a new risk
 
-Blunt assessment: PX4 SITL is slow, and this machine (12 threads, 16 GB) will
+**This was the project's #1 risk and is no longer.** Training moved to a
+GPU-parallel Isaac Lab environment (§3.1, D12), where the constraint is GPU
+memory rather than wall-clock simulation, and 1–3 M steps is hours rather than
+days. The risk did not vanish so much as change shape: it is now **RQ5, the
+sim-to-sim gap**, which is at least measurable, falsifiable, and interesting
+enough to publish either way.
+
+Two budgets now exist and must not be confused:
+
+| | Where | Scale | Bounded by |
+|---|---|---|---|
+| **Training** | Isaac Lab, `isaacsim` env | 1–3 M+ steps | GPU memory, env count |
+| **Evaluation** | PX4 + Gazebo, `aero-safe-rl` env | ~100 episodes × cell | wall clock, worker count |
+
+The Isaac side's env count on this hardware (RTX 2070 Mobile, 8 GB) is
+**unmeasured and must be measured before the plan depends on it** — that is
+Phase 3b's only job, and it is a gate in the same sense Phase 4's throughput
+table is. Isaac Sim 5.1's stated minimum is an RTX 4080 / 16 GB, so this
+machine is below spec and a headless physics-only workload is the plausible
+case, not a certain one.
+
+The evaluation-side budget is much smaller than the old training budget, which
+is what makes Phase 4 easier than originally scoped (see that phase's note).
+
+#### The old analysis, retained — it still governs the evaluation side
+
+PX4 SITL is slow, and this machine (12 threads, 16 GB) will
 support roughly **3–4 workers**, not 32. Mitigations, in order of importance:
 
 1. **Low decision rate (5 Hz)** — a 90 s episode is ~450 steps, not 22,500. This
@@ -732,20 +934,20 @@ support roughly **3–4 workers**, not 32. Mitigations, in order of importance:
 4. **3–4 isolated workers** via `SubprocVecEnv` over the Phase 4 farm.
 5. **Short episodes** — terminate early and decisively on crash.
 
-Order-of-magnitude target: **1–3 M environment steps** in roughly 2–5 days.
-
 **Do not budget from an assumption.** The tempting arithmetic — 4 workers × 8×
 = 32× aggregate — is not supported by any measurement, and is almost certainly
 wrong: each worker now runs its own Gazebo physics server, and gz-sim physics is
 effectively single-threaded per world, so four workers contend for cores and
 per-worker RTF falls. Phase 4 measures aggregate throughput directly across
-N × speed-factor and picks the operating point. **Phase 9 is budgeted from that
-one number and nothing else.**
+N × speed-factor and picks the operating point. **The evaluation sweep is
+budgeted from that one number and nothing else.**
 
-If the measurement shows 1–3 M steps is unreachable, the fallback is a
-reduced-order quadrotor model for policy pre-training with PX4-in-the-loop
-fine-tuning — **deferred by default** (D5), since it adds a second dynamics
-model and a sim-to-sim gap. Revisit only if Phase 4 forces it.
+*(Superseded: this section previously named a reduced-order pre-training model
+as a deferred fallback under D5, rejected for adding a second dynamics model
+and a sim-to-sim gap. D12 adopts exactly that approach as the primary path —
+the second dynamics model is now the Isaac Lab environment, and the sim-to-sim
+gap is now RQ5. The cost was always real; what changed is that it buys a
+tractable sample budget and a research question rather than only the former.)*
 
 ### 7.5 Reproducibility standard (D11)
 
@@ -812,6 +1014,14 @@ The four-condition comparison, all sharing identical missions, seeds, and PX4 co
   never a single best run.
 - Identical PX4 parameters across all conditions; any difference is a confound.
 
+**All six conditions are executed on the PX4-in-the-loop stack** (principle
+#13). C4/C5/C6's policies are trained in Isaac, but no condition is *measured*
+there. The one Isaac-side table in the paper is the **RQ5 transfer table** —
+each policy's Isaac performance next to its PX4 performance — which is a
+separate result about the method's construction, not part of the C1–C6
+comparison. Keeping these apart is what stops "trained in Isaac" from becoming
+an unstated advantage for C4 over the C3 baseline.
+
 ---
 
 ## 9. Evaluation metrics
@@ -876,16 +1086,22 @@ aero-safe-rl/
 ├── ros2_ws/                 # colcon workspace
 │   └── src/aero_bridge/     #   telemetry pipeline, mission executor, command interface
 ├── ai/                      # fault detection
-│   ├── features/            #   feature extraction (shared with rl/ and dashboard/)
+│   ├── features/            #   feature extraction (shared with rl/ and isaac/)
 │   ├── models/              #   architectures
 │   ├── train.py  eval.py
 │   └── checkpoints/
-├── rl/                      # reinforcement learning
-│   ├── envs/                #   Gymnasium environment
-│   ├── rewards/             #   reward functions
+├── rl/                      # reinforcement learning — PX4 side (aero-safe-rl env)
+│   ├── envs/                #   evaluation Gym env: thin wrapper over EpisodeRunner
+│   ├── rewards/             #   reward functions (shared spec with isaac/)
 │   ├── policies/            #   rule-based FSM + RL policy wrappers
-│   ├── train.py  eval.py
-│   └── checkpoints/
+│   ├── eval.py              #   loads a checkpoint, runs the PX4 stack
+│   └── checkpoints/         #   archived trained policies (+ spec digests)
+├── isaac/                   # TRAINING side — isaacsim env (py3.11). NEVER imports
+│   ├── envs/                #   rl/, simulation/, aero_bridge or rclpy. CLAUDE.md §0.1
+│   │                        #   Isaac Lab quadrotor task + geometric controller
+│   ├── faults/              #   Isaac-side rotor degradation (matches the gz plugin)
+│   ├── detector_model/      #   calibrated detector-output simulator (Phase 8b)
+│   └── train.py             #   PPO; writes checkpoints rl/ later reads
 ├── experiments/             # orchestration + analysis
 │   ├── episode_runner.py    #   THE single "fly one episode" implementation
 │   ├── worker_supervisor.py #   one worker's processes + health
@@ -895,7 +1111,6 @@ aero-safe-rl/
 │   ├── run_matrix.py        #   batch runner
 │   ├── metrics.py           #   THE single metrics implementation
 │   └── analysis/            #   figure and table generation
-├── dashboard/               # later: backend/ + frontend/
 ├── scripts/                 # env_report.sh, sim_start.sh, utilities
 ├── tests/                   # unit (default), sim/ (@sim), slow/ (@slow)
 │   └── fixtures/            #   recorded telemetry — most tests need no sim
@@ -905,9 +1120,10 @@ aero-safe-rl/
 ```
 
 **Boundaries that matter:**
-- `ai/features/` is imported by `rl/` and `dashboard/`. Feature extraction is
-  defined exactly once, and imports no ROS — which is what lets Phase 7 iterate
-  offline in seconds.
+- `ai/features/` is imported by `rl/` and, for the shared subset, by `isaac/`.
+  Feature extraction is defined exactly once, and imports no ROS — which is what
+  lets Phase 7 iterate offline in seconds and what lets the Isaac side reuse it
+  without dragging in the ROS 2 stack.
 - `experiments/metrics.py` is the only place a metric is computed.
 - `experiments/episode_runner.py` is the only place an episode is flown. The
   Gymnasium env, the dataset generator and the evaluation harness are callers.
@@ -916,6 +1132,11 @@ aero-safe-rl/
 - `simulation/` knows nothing about learning; `ai/` and `rl/` know nothing about Gazebo.
 - The recovery interface (`rl/policies/`) is identical for FSM and RL policies —
   they are swappable behind one API. This is what makes C3 vs C4 a fair comparison.
+- **`isaac/` and everything else are in different conda environments and never
+  import each other** (`CLAUDE.md` §0.1). They communicate through three files:
+  the frozen observation/action spec, the frozen normalisation statistics, and
+  a policy checkpoint stamped with the spec digest it was trained under. This
+  is the boundary that, if violated, silently invalidates every RQ5 number.
 
 ---
 
@@ -928,12 +1149,14 @@ aero-safe-rl/
 | **1b** | One worker starts, stops and restarts independently; `pgrep -cf "^gz sim "` equals the instance count; identity read from `instance_<N>.json` |
 | **2** | Takeoff→hover→land driven entirely from a ROS 2 Python node, **on instance 1 as well as 0**; telemetry latency measured; all required topics confirmed carrying valid data; no wall-clock sleeps in flight logic |
 | **3** | 20/20 healthy missions succeed; position RMSE noise floor documented; run-to-run divergence band at fixed seed measured; all three reset tiers implemented and costed; episode schema frozen and validated |
-| **4** | 4 workers × 100 episodes unattended, zero orphans, flat memory; single-worker restart proven not to disturb siblings; `docs/throughput.md` states the chosen operating point |
+| **3b** | Isaac Lab runs headless on this GPU; env-count × steps/sec × VRAM table measured; `docs/isaac_feasibility.md` states the operating point **or** states that D12 is not viable here |
+| **4** | 2+ workers × 100 episodes unattended, zero orphans, flat memory; single-worker restart proven not to disturb siblings; `docs/throughput.md` states the chosen operating point |
 | **5** | Feature vector logged for a full healthy mission with no gaps; replay determinism verified bitwise; causality test passes; normalisation stats frozen |
 | **6** | Graded severity injected and **confirmed applied**, visible in features above the Phase 3 noise floor; PX4 `FailureDetector` confirmed silent at target severities; ≥500-episode labelled dataset generated; PX4 tree unmodified |
 | **7** | Detector beats threshold and classical baselines on held-out **episodes**; per-severity ROC and latency distribution reported; online inference < 20 ms |
 | **8** | FSM measurably beats no-recovery across the severity sweep; tuning sweep archived; shared policy interface in place |
-| **9** | Obs/action/reward specs frozen and version-stamped before training; PPO policy beats the tuned FSM on success and crash rate with non-overlapping CIs over ≥3 seeds — **or** the null result is documented with evidence |
+| **8b** | Both environments assert against one frozen `observation_v1.yaml`; Isaac and Gazebo fault models validated to match at matched severity; detector-output simulator fitted to Phase 7's measured error and documented |
+| **9** | Obs/action/reward specs frozen and version-stamped before training; PPO policy beats the tuned FSM **on the PX4 stack** on success and crash rate with non-overlapping CIs over ≥3 seeds — **or** the null result is documented with evidence; the RQ5 Isaac-vs-PX4 transfer table exists |
 | **10** | Full condition matrix (C1–C6) executed; all figures/tables regenerate from raw logs by one command; RQ3 ablation complete; invalid episodes accounted for explicitly |
 | **11** | Generalization table complete, including honest failure-mode analysis |
 | **12** | Hexacopter flies healthy mission and closes the fault→detect→recover loop |
@@ -946,7 +1169,7 @@ aero-safe-rl/
 Phases 0 and 1 are complete. Phase 2 is in progress. The 2026-08-20 review
 opened work that must land before Phase 2 can be closed.
 
-1. ✅ **Decisions D1–D6 resolved** (§14) — all approved.
+1. ✅ **Decisions D1–D6 resolved** (§14) — all approved. *(D5 and D6 were later superseded by D12 on 2026-09-21.)*
 2. ✅ **Repo renamed and initialised** (`aero-safe-rf` → `aero-safe-rl`), `git init` done.
 3. ✅ **Miniconda installed**, empty conda env `aero-safe-rl` (Python 3.10) created.
 4. ✅ **`.gitignore` added** and committed.
@@ -960,33 +1183,30 @@ opened work that must land before Phase 2 can be closed.
 
 ### Open now, in order
 
-1. **Install `pytest` and `pyarrow`** into the conda env and re-export
-   `environment.yml`. Every phase from here requires unit tests, and the Parquet
-   episode records of §3 cannot be written without `pyarrow`. Neither is
-   currently installed.
-2. **Phase 1b — worker isolation and ownership** (`milestones.md` M1b). Rewrite
-   `sim_start.sh`/`sim_stop.sh` around `GZ_PARTITION`, `PX4_GZ_STANDALONE`,
-   uniform identity and an `instance_<N>.json` handshake file. Add
-   `simulation/instance_spec.py` as the single source of truth.
-3. **Fix the two silent multi-instance bugs already present in
-   `ros2_ws/src/aero_bridge/aero_bridge/px4_interface.py`**, each with a test
-   that fails before the fix:
-   - `target_system` is hardcoded to `1`; PX4's `Commander.cpp:746` drops any
-     command whose `target_system` is neither `0` nor `MAV_SYS_ID`, and
-     `MAV_SYS_ID = instance + 1`. Arm, offboard and land are therefore ignored
-     on every instance except 0, with no error anywhere.
-   - Topic names are hardcoded to `/fmu/out/...`; instance 1 publishes to
-     `/px4_1/fmu/out/...`, so the subscription succeeds and receives nothing
-     forever.
-4. **Finish Phase 2** — the `PX4Clock` and `arming_sequence` helpers, and a
-   `sim`-marked test that flies instances 0 and 1 concurrently.
-5. **Phase 3**, which now also owns the episode record schema, the three-tier
-   reset ladder, and the run-to-run divergence measurement that D11 depends on.
-6. **Phase 4** — the parallel simulation farm, and the throughput measurement
-   that Phase 9's budget is derived from.
+Items 1–5 of the previous list are **done** (pytest/pyarrow, Phase 1b, both
+`px4_interface.py` multi-instance bugs, Phase 2's helpers, Phase 3). What
+remains:
 
-**Do not start Phase 9 until `docs/throughput.md` exists and says the sample
-budget is reachable.**
+1. **Reboot** to clear the NVIDIA kernel-module / NVML version mismatch
+   (580.173.02 vs 580.178). Until this is done `nvidia-smi` fails,
+   `torch.cuda.is_available()` is `False`, and nothing Isaac-related can be
+   attempted or measured.
+2. **Phase 3b — Isaac Lab feasibility spike.** Install Isaac Lab into the
+   existing `isaacsim` env, run one stock quadrotor task headless, and measure
+   the env-count / steps-per-second / VRAM table. Write
+   `docs/isaac_feasibility.md`. **This gates D12** — if it fails, decide
+   between a cloud GPU and reverting to PX4-in-the-loop training *now*, not at
+   Phase 9.
+3. **Phase 4** — the parallel simulation farm, now scoped as an *evaluation*
+   farm (see that phase's rescope note), plus its throughput table.
+4. **Phases 5 → 8** unchanged: feature pipeline, fault injection and dataset,
+   detector, rule-based baseline.
+5. **Phase 8b** — the Isaac Lab training environment, which cannot be finished
+   before Phase 7 supplies the detector error model it must simulate.
+
+**Do not start Phase 8b or 9 until `docs/isaac_feasibility.md` exists and says
+the sample budget is reachable.** The old gate on `docs/throughput.md` now
+governs the evaluation sweep rather than training.
 
 ---
 
@@ -998,8 +1218,8 @@ budget is reachable.**
 | **D2** | Partial-degradation injection mechanism | ✅ **Gazebo-side rotor thrust scaling**, implemented as a **project-owned gz-sim system plugin** (`RotorDegradationSystem`) living in `simulation/gz_plugins/`, not in the PX4 tree. See the note below. |
 | **D3** | Repo directory name | ✅ Rename `aero-safe-rf` → **`aero-safe-rl`**. |
 | **D4** | Conditions C5 (oracle detection) and C6 (detector ablation) | ✅ **Included** in the evaluation matrix. |
-| **D5** | Reduced-order pre-training model | ✅ **Deferred.** Revisit only if Phase 4 throughput measurements prove PX4-in-the-loop training unreachable. |
-| **D6** | Isaac Sim as the simulator backend | ✅ **Declined.** Gazebo Harmonic stays primary for M1–M13; Isaac Sim is not part of the plan. See the note below. |
+| **D5** | Reduced-order pre-training model | ⛔ **SUPERSEDED by D12 (2026-09-21).** Was: deferred. Now adopted as the primary training path, realised as Isaac Lab. |
+| **D6** | Isaac Sim as the simulator backend | ⛔ **SUPERSEDED by D12 (2026-09-21).** Was: declined. Now partially reversed — Isaac enters as the *training* simulator, not as a replacement for Gazebo. |
 
 ### Added 2026-08-20 after the multi-instance review
 
@@ -1010,6 +1230,12 @@ budget is reachable.**
 | **D9** | Instance identity | ✅ **Uniform, no special case for instance 0.** `PX4_UXRCE_DDS_NS=px4_<N>` for every N; `target_system = N+1` always; identity computed once in `simulation/instance_spec.py` and published as `instance_<N>.json`. |
 | **D10** | Timing source in flight logic | ✅ **Simulated time only, sourced from `GzSimClock`** (Gazebo's native clock over gz-transport) — not `px4_msgs` timestamps, which M2 measured to track wall clock almost exactly regardless of speed factor (`uxrce_dds_client`'s session-level resync). Wall clock is permitted solely in the hang watchdog. See `docs/parallelism.md` §2.5. |
 | **D11** | Reproducibility standard | ✅ **Statistical, not bitwise** — see §7.5. Pure functions of recorded data are bitwise reproducible; whole-pipeline results are reproducible within a divergence band measured in Phase 3. |
+
+### Added 2026-09-21 — the simulator strategy
+
+| ID | Decision | Resolution |
+|---|---|---|
+| **D12** | Where the RL policy is trained, and where results are measured | ✅ **Hybrid: train in Isaac Lab, evaluate in PX4-in-the-loop.** Supersedes D5 and D6. See §3.1 and the note below. |
 
 ### Note on D7–D11 — what the review found
 
@@ -1066,18 +1292,34 @@ plus a line in our own copy of the x500 SDF. That keeps PX4 completely stock
 (principle #3) and decouples the fault framework from the PX4 version — the
 plugin survives a future PX4 bump.
 
-### Note on D6 — Isaac Sim considered and declined (2026-08-15)
+### Note on D12 — Isaac Lab as the training simulator (2026-09-21)
 
-Switching the simulator backend from Gazebo Harmonic to NVIDIA Isaac Sim was
-considered after M0. Declined: PX4 `v1.17.0` has no native Isaac Sim SITL
-target (only Gazebo/jMAVSim/FlightGear/JSBSim); Isaac Sim's stated minimum GPU
-(RTX 4080 16GB, or RTX 3070 8GB for the older baseline) is above this
-machine's RTX 2070 Max-Q; its efficient multi-robot parallelism doesn't apply
-here since this project deliberately runs one full PX4 process per vehicle
-(principle #5), so the planned parallel instances would likely collapse to 1;
-and it gates reproducibility behind an NVIDIA account, working against Phase
-13's "clean machine reproduces the result" goal. Gazebo remains the backbone
-for every research milestone; Isaac Sim is not part of the plan.
+Supersedes D5 and D6. Three options were weighed: a **full swap** of Gazebo for
+Isaac Sim with PX4 still in the loop (via Pegasus Simulator); **Isaac Lab
+only**, dropping PX4 entirely; and the **hybrid** that was chosen. Full detail
+of the architecture is in §3.1.
+
+Full swap was rejected on throughput: Pegasus documents running *below*
+real-time at its default 250 Hz physics with a sensor suite, against a measured
+8.3× for Gazebo on this machine, and each Isaac worker is a multi-GB process,
+so 3–4 parallel workers collapse to one. Isaac Lab only was rejected because it
+removes PX4 from the loop, and with it the sub-threshold framing, the
+fixed-low-level-controller comparison, and the hardware-transferability claim —
+i.e. all three novelty arguments in §2.
+
+**Which of D6's original objections survive:**
+
+| D6's objection (2026-08-15) | Status under D12 |
+|---|---|
+| PX4 v1.17.0 has no native Isaac SITL target | **Still true, now irrelevant** — under D12 Isaac never talks to PX4. No bridge is needed. |
+| Isaac's minimum GPU is above this machine's RTX 2070 | **Still true, and the main open risk.** Phase 3b measures it before anything depends on it. Headless physics-only is the cheapest possible Isaac workload, which is what makes it plausible at all. |
+| GPU parallelism doesn't help, since we run one PX4 per vehicle | **Resolved** — the Isaac side has no PX4, so the parallelism applies fully. This was the objection that D12's shape exists to answer. |
+| Gates reproducibility behind an NVIDIA account | **Partially stands, and constrains Phase 13.** Mitigation: the headline result is an *evaluation* result, reproducible on the PX4/Gazebo stack alone from an archived checkpoint. Only *retraining* needs Isaac. `docs/reproduce.md` must state both paths separately and the checkpoint must be archived, or this objection becomes real again. |
+
+The honest summary: D6 was correctly argued for the question it was asked
+("should Isaac replace Gazebo?"). D12 asks a different question and gets a
+different answer. The one objection that was never about scope — the GPU — is
+the one that still has to be settled empirically.
 
 ---
 
@@ -1085,7 +1327,12 @@ for every research milestone; Isaac Sim is not part of the plan.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| RL training too slow on this hardware | **High** | Low decision rate, headless, speed factor, 3–4 isolated workers; **Phase 4 measures aggregate throughput and gates Phase 9 on it**; D5 fallback |
+| RL training too slow on this hardware | ~~High~~ **Low** | **Largely resolved by D12** — training moved to GPU-parallel Isaac Lab. Residual risk is now the row below. |
+| Isaac Sim will not run usefully on an RTX 2070 / 8 GB / 15 GB RAM | **High** | The machine is below Isaac Sim 5.1's stated minimum. **Phase 3b measures it before anything depends on it**, headless and physics-only being the cheapest workload. Fallbacks if it fails: cloud GPU for training runs, or revert to PX4-in-the-loop training under the old Phase 4 budget. |
+| Policy trains in Isaac and does not transfer to PX4 (RQ5 negative) | **Medium** | Mitigated by the high-level 5 Hz action space, which keeps the differing low-level controller out of the policy's job. Not eliminated — this is why RQ5 is a measured question. A negative result is reportable; the fallback is PX4-in-the-loop fine-tuning of the pretrained policy. |
+| The two fault models silently diverge | **High** | They are one contract with two backends (`CLAUDE.md` §1.6); a cross-validation test against a recorded fixture asserts matching thrust reduction at matched severity. Without it, training and evaluation use different faults and every transfer number is meaningless. |
+| Observation spec drifts between the two environments | **High** | One frozen `observation_v1.yaml`, one shared test asserting both environments' spaces; checkpoints carry the spec digest and evaluation refuses a mismatch. Failure here is indistinguishable from a transfer failure, which is what makes it dangerous. |
+| Isaac dependency weakens Phase 13 reproducibility | Medium | Headline results are *evaluation* results, reproducible on the PX4/Gazebo stack alone from an archived checkpoint; only retraining needs Isaac. `docs/reproduce.md` states the two paths separately. |
 | Silent multi-instance bugs (shared world, namespace, `target_system`) | **High** | D7–D9; identity computed once in `instance_spec.py`; every simulator-touching change verified with ≥2 concurrent instances; unit tests pin PX4's `rcS` behaviour so a version bump fails a test rather than a training run |
 | Worker failures biasing the dataset | **High** | Failures recorded with `valid=false` and a reason, never dropped; restart counts in the run manifest and in results tables; run-level abort above a restart-rate threshold |
 | Wall-clock timing bugs appearing only at speed factor > 1 | Medium | D10; `PX4Clock` is the only wait primitive; a grep check in the Phase 2 verification block |

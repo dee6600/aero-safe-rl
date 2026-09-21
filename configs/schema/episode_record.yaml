@@ -1,0 +1,90 @@
+# Episode record schema (M3). The one format every writer in this project
+# uses for one flight -- M4's runner, M6's dataset, M7's detector, M9's RL
+# loop and M10's metrics all read records shaped exactly like this. Changing
+# a field here means bumping schema_version, not editing a reader to cope
+# with two shapes (CLAUDE.md §7).
+#
+# Loaded and enforced by experiments/episode_schema.py -- that module, not
+# this file alone, is what a writer actually calls. termination_reasons and
+# reset_tiers are mirrored by Python enums in that module; a test
+# (tests/test_episode_schema.py::test_termination_reason_enum_closed) pins
+# the two representations equal so they cannot silently drift apart.
+
+schema_version: "1"
+
+# Closed enum. A record's termination_reason must be exactly one of these.
+# Extend deliberately when a milestone adds a real new outcome (M4 adds
+# worker-failure reasons, M6 adds fault-related ones) -- never write a
+# free-text reason (CLAUDE.md anti-pattern 16).
+termination_reasons:
+  - completed          # all waypoints reached, final hover held, landed and disarmed
+  - preflight_failed    # PX4 never reported pre_flight_checks_pass=True
+  - arm_timeout          # preflight passed but PX4 never confirmed ARMED
+  - offboard_rejected     # armed but PX4 never reached NAVIGATION_STATE_OFFBOARD
+  - hold_timeout          # a waypoint/hover hold's wall-clock watchdog elapsed
+  - land_timeout           # land commanded but PX4 never confirmed DISARMED
+  - episode_timeout        # the mission's own sim-time budget elapsed first
+  - aborted_error           # an exception outside the typed flight-sequence errors
+
+# Closed enum for the tier of reset applied before this episode's flight.
+# "none" is the one legitimate value for the first episode flown on a
+# freshly started worker, before any reset has happened.
+reset_tiers:
+  - none
+  - soft
+  - medium
+  - hard
+
+# One row, written once, when an episode ends.
+episode_fields:
+  required:
+    - schema_version
+    - run_id
+    - episode_id
+    - worker_id
+    - instance
+    - seed
+    - instance_spec_digest
+    - mission_id
+    - mission_config_digest
+    - feature_version
+    - env_versions
+    - reset_tier
+    - termination_reason
+    - valid
+    - t_sim_start_s
+    - t_sim_end_s
+    - t_sim_duration_s
+    - t_wall_start_utc
+    - t_wall_end_utc
+    - t_wall_duration_s
+    - n_steps
+    - waypoints_reached
+    - position_rmse_m
+    - final_position_error_m
+
+# One row per control-loop tick during the flight (CONTROL_RATE_HZ in
+# mission_executor.py), written by the same episode's logger before the
+# summary row.
+step_fields:
+  required:
+    - schema_version
+    - run_id
+    - episode_id
+    - worker_id
+    - step_index
+    - t_sim_s
+    - t_wall_utc
+    - armed
+    - nav_state
+    - pos_x
+    - pos_y
+    - pos_z
+    - vel_x
+    - vel_y
+    - vel_z
+    - target_x
+    - target_y
+    - target_z
+    - position_error_m
+    - battery_remaining
