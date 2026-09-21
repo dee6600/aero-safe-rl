@@ -36,7 +36,8 @@ class TerminationReason(str, enum.Enum):
     (CLAUDE.md anti-pattern 16).
 
     WORKER_RESTARTED and OFFBOARD_LOST were added in schema v2 (M4 tasks
-    1-3) -- see configs/schema/episode_record.yaml's module comment."""
+    1-3); SIM_FAULT was added in M4 task 4 -- see
+    configs/schema/episode_record.yaml's module comment."""
     COMPLETED = "completed"
     PREFLIGHT_FAILED = "preflight_failed"
     ARM_TIMEOUT = "arm_timeout"
@@ -46,6 +47,7 @@ class TerminationReason(str, enum.Enum):
     LAND_TIMEOUT = "land_timeout"
     EPISODE_TIMEOUT = "episode_timeout"
     WORKER_RESTARTED = "worker_restarted"
+    SIM_FAULT = "sim_fault"
     ABORTED_ERROR = "aborted_error"
 
 

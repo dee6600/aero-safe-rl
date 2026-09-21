@@ -71,6 +71,23 @@ class MissionTimeout(FlightSequenceError):
     mission-duration budget."""
 
 
+class SimFault(FlightSequenceError):
+    """Position or velocity reported a non-finite value (docs/parallelism.md
+    §8's last catalogue row). Distinct from every other FlightSequenceError
+    here: those are outcomes a real vehicle can also produce (a timeout, a
+    rejected mode switch); this one means the simulation state itself broke
+    (Gazebo/PX4 diverged into a physically meaningless state), so the
+    episode is invalidated rather than treated as an ordinary unsuccessful
+    flight."""
+
+
+def _is_finite_state(px: float, py: float, pz: float,
+                      vx: float, vy: float, vz: float) -> bool:
+    """True iff every position/velocity component is a real, finite number.
+    A pure function so it's testable without a simulator or even a Node."""
+    return all(math.isfinite(v) for v in (px, py, pz, vx, vy, vz))
+
+
 _REQUIRED_MISSION_FIELDS = (
     "mission_id", "schema_version", "altitude_m", "acceptance_radius_m",
     "hold_time_s", "final_hover_s", "timeout_s", "waypoints", "geofence",
@@ -85,6 +102,7 @@ _REASON_FOR_ERROR: dict[type, TerminationReason] = {
     HoldTimeout: TerminationReason.HOLD_TIMEOUT,
     LandTimeout: TerminationReason.LAND_TIMEOUT,
     MissionTimeout: TerminationReason.EPISODE_TIMEOUT,
+    SimFault: TerminationReason.SIM_FAULT,
 }
 
 
@@ -190,6 +208,8 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
         battery = px4.latest['battery_status']
         px, py, pz = odom.position[0], odom.position[1], odom.position[2]
         vx, vy, vz = odom.velocity[0], odom.velocity[1], odom.velocity[2]
+        if not _is_finite_state(px, py, pz, vx, vy, vz):
+            raise SimFault(f"non-finite vehicle state: pos=({px},{py},{pz}) vel=({vx},{vy},{vz})")
         err = math.dist((px, py, pz), target)
         errors.append(err)
         row = dict(
@@ -235,9 +255,20 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
             if not within:
                 held_since["t"] = None
                 return False
+            if now_us is None:
+                # A transient clock read failure (clock.now_us() returning
+                # None) -- rare, and more likely under heavy multi-worker
+                # CPU contention. Don't let it corrupt the hold timer: don't
+                # start OR evaluate it on a tick with no real timestamp.
+                # Found live (M4 task 6's throughput sweep, worker_count=3):
+                # this used to set held_since["t"] = None while `within` was
+                # True, and a LATER tick with a real timestamp then computed
+                # <int> - None and crashed the whole mission with an
+                # unhandled TypeError.
+                return False
             if held_since["t"] is None:
                 held_since["t"] = now_us
-            return ((now_us or 0) - held_since["t"]) / 1e6 >= hold_duration_s
+            return (now_us - held_since["t"]) / 1e6 >= hold_duration_s
 
         return condition
 

@@ -64,7 +64,7 @@ from aero_bridge.px4_interface import PX4Interface
 from experiments.episode_schema import ResetTier
 from simulation import sim_clock  # import side effect: gz Python bindings on sys.path
 from simulation.instance_spec import InstanceSpec
-from simulation.worker_process import WorkerProcessError, start_worker, stop_worker
+from simulation.worker_process import REPO_DIR, WorkerProcessError, start_worker, stop_worker
 
 import gz.transport13 as _gz_transport
 from gz.msgs10.boolean_pb2 import Boolean as _GzBoolean
@@ -81,7 +81,22 @@ HARD_RESET_WALL_TIMEOUT_S = 150.0
 POSITION_TOLERANCE_M = 0.3
 VELOCITY_TOLERANCE_M_S = 0.2
 
-REPO_DIR = Path(__file__).resolve().parents[4]
+# REPO_DIR is imported above from simulation.worker_process, NOT computed
+# locally as Path(__file__).resolve().parents[<N>] -- found live (M4 task
+# 6's throughput sweep): this file gets imported from three DIFFERENT
+# physical locations depending on colcon/PYTHONPATH resolution at runtime
+# (repo src/, colcon's build/ copy, and colcon's install/.../site-packages/
+# copy), each nested at a DIFFERENT depth under the repo root. A fixed
+# parent-count happened to give the right answer for src/ and build/ (same
+# depth by coincidence) but silently computed ros2_ws/install/aero_bridge
+# itself as "the repo root" when resolved from the install/site-packages
+# copy, which made every hard_reset() call fail immediately (sim_stop.sh
+# "not found" under that wrong path) as soon as a colcon rebuild made that
+# copy the one actually imported. simulation/worker_process.py is a plain,
+# never-duplicated module (not part of any ROS package build/install
+# step), so its own REPO_DIR is reliable regardless of which of the three
+# aero_bridge copies happens to be loaded -- reuse it instead of
+# re-deriving a second, fragile computation (CLAUDE.md §1.4).
 
 
 class ResetError(RuntimeError):

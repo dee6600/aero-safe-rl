@@ -38,15 +38,27 @@ own 30s subprocess timeout in __init__ (see below) tripped, which looked
 like a crash. run_episodes.py already does this correctly (see its own
 `if __name__ == "__main__":` block) -- follow that pattern, always.
 
-Explicitly out of scope for this session (M4 tasks 1-3; see milestones.md):
-task 4's full structured-failure handling -- this module restarts a dead
-worker and counts the restart, but does not yet synthesize a placeholder
-`valid=false, termination_reason=worker_restarted` record for the exact
-episode that was in flight when the worker died (that episode's result is
-simply never produced, which is a real gap task 4 closes, not silently
-ignored -- restart_counts already gives visibility that it happened). Also
-out of scope: the run manifest (task 5), the throughput sweep (task 6), the
-soak test (task 7).
+M4 task 4 (structured failure handling) closed here: when a restart happens
+mid-episode, `_on_restart` now synthesizes a `valid=false,
+termination_reason=worker_restarted` placeholder record for the exact
+episode that was in flight (`_synthesize_lost_episode_record`), via a
+standalone `EpisodeLogger` -- no rclpy needed for that, so it's safe to do
+from this (parent) process. It also enforces a run-level restart-rate
+abort (`restart_rate_abort_threshold`): a run whose total restarts across
+all workers exceed that fraction of total planned episodes fails loudly
+rather than quietly producing a dataset biased toward whichever fault
+severities crash workers more often (docs/parallelism.md §8).
+
+M4 task 5 also closed here: every run writes `results/<run_id>/manifest.json`
+(`experiments/run_manifest.py`'s `RunManifest`) incrementally -- after every
+episode and every restart, not only at the end -- so a killed run still
+leaves a readable manifest. `run()` also takes optional `on_result`/
+`on_restart` progress callbacks, fired from the same two points
+(`_drain_queue`/`_on_restart`) the manifest updates from; task 6's throughput
+sweep and task 7's soak test both use these to print live per-episode
+progress rather than going silent for the length of a whole run.
+
+Still out of scope: the throughput sweep (task 6), the soak test (task 7).
 """
 from __future__ import annotations
 
@@ -57,11 +69,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from experiments.episode_runner import capture_env_versions
+from experiments.episode_runner import _iso, capture_env_versions
+from experiments.run_manifest import RunManifest
 from experiments.worker_supervisor import (
     DEFAULT_RUN_DIR,
     RestartBudgetExhausted,
     WorkerSupervisor,
+    WorkerSupervisorError,
     write_heartbeat,
 )
 from simulation.instance_spec import InstanceSpec
@@ -164,7 +178,8 @@ class SimFarm:
                  instance_base: int = 0, seed_base: int = 0, reset_tier: str = "soft",
                  speed_factor: float = 1.0, headless: bool = True, run_id: Optional[str] = None,
                  results_dir: str = "results", sim_run_dir: str = DEFAULT_RUN_DIR,
-                 heartbeat_stall_timeout_s: float = 45.0, restart_budget_per_worker: int = 5,
+                 heartbeat_stall_timeout_s: float = 45.0, restart_budget_per_worker: int = 20,
+                 restart_rate_abort_threshold: float = 0.5,
                  stagger_s: float = 3.0, health_poll_interval_s: float = 2.0,
                  max_wall_s: Optional[float] = None):
         import datetime
@@ -199,6 +214,14 @@ class SimFarm:
         self.sim_run_dir = sim_run_dir
         self.stagger_s = stagger_s
         self.health_poll_interval_s = health_poll_interval_s
+        # M4 task 4 (docs/parallelism.md §8): total restarts across every
+        # worker, divided by total planned episodes, past this fraction
+        # aborts the whole run loudly rather than quietly finishing with a
+        # dataset biased toward whichever fault severities crash workers
+        # more often. Checked in _on_restart(), which every restart path
+        # funnels through.
+        self.restart_rate_abort_threshold = restart_rate_abort_threshold
+        self.restart_budget_per_worker = restart_budget_per_worker
         self.max_wall_s = (max_wall_s if max_wall_s is not None
                             else n_episodes_per_worker * DEFAULT_PER_EPISODE_WALL_BUDGET_S)
         self.run_id = run_id or (
@@ -216,8 +239,40 @@ class SimFarm:
         self.results: list[dict] = []
         self.restart_counts: dict[int, int] = {spec.instance: 0 for spec in self.specs}
         self._completed_per_worker: dict[int, int] = {spec.instance: 0 for spec in self.specs}
+        # M4 tasks 6/7 found live: multiprocessing.Queue.put() can return
+        # before the item is actually flushed through the underlying pipe --
+        # if the child process then dies right after (e.g. its own
+        # rclpy.shutdown() raises under heavy multi-worker resource
+        # contention), the parent can conclude the worker died with that
+        # episode still missing, synthesize a worker_restarted placeholder
+        # for it, and THEN have the real, late-arriving result turn up in a
+        # later _drain_queue() call -- two conflicting records for the same
+        # (worker_id, episode_id). Tracked here so _record_result can keep
+        # exactly one record per episode regardless of arrival order.
+        self._recorded_episode_ids: set[tuple[int, str]] = set()
         self._ctx = multiprocessing.get_context("spawn")
         self._result_queue = self._ctx.Queue()
+
+        # M4 task 5: one manifest per run, written incrementally (see
+        # run_manifest.py). worker_to_instance uses the SAME k->instance
+        # mapping worker_instance() derives self.specs from, so it's read
+        # back here rather than recomputed.
+        worker_to_instance = {k: spec.instance for k, spec in enumerate(self.specs)}
+        self.manifest = RunManifest(
+            run_id=self.run_id, mission_id=self.mission_id,
+            mission_config_digest=self._mission_digest, env_versions_json=self._env_versions_json,
+            seed_base=self.seed_base, worker_to_instance=worker_to_instance,
+            restart_budget_per_worker=self.restart_budget_per_worker,
+            restart_rate_abort_threshold=self.restart_rate_abort_threshold)
+        self._manifest_path = Path(self.results_dir) / self.run_id / "manifest.json"
+        self.manifest.write(self._manifest_path)
+
+        # M4 tasks 6/7's progress callbacks (optional; set for real by run()).
+        # Initialized here, not only in run(), because _on_restart() and
+        # _synthesize_lost_episode_record() are also called directly outside
+        # a run() invocation in this module's own unit tests.
+        self._progress_on_result = None
+        self._progress_on_restart = None
 
     # ------------------------------------------------------------- context
 
@@ -225,8 +280,35 @@ class SimFarm:
         for i, sup in enumerate(self.supervisors):
             if i > 0:
                 time.sleep(self.stagger_s)
-            sup.start()
+            self._start_with_retries(sup)
         return self
+
+    def _start_with_retries(self, sup: WorkerSupervisor, *, max_attempts: int = 3) -> None:
+        """The initial start (unlike a mid-run restart, which already has
+        ensure_healthy()'s restart_budget) had no retry budget at all: one
+        transient cold-start hiccup failed the entire run before a single
+        episode flew. Found live (M4 task 7's soak test): simultaneous
+        4-worker startup occasionally times out waiting for the first
+        worker's telemetry (~90s deadline) under contention -- observed on
+        two different workers on two different attempts, so it's a real,
+        reproducible startup-contention issue, not a single flaky instance.
+        A small, separate retry budget here (not reusing
+        restart_budget_per_worker, which is about a worker that died
+        mid-run, not one that never came up) gives a transient hiccup a
+        chance to clear rather than failing the whole run on the first one.
+        """
+        last_exc: Optional[WorkerSupervisorError] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                sup.start()
+                return
+            except WorkerSupervisorError as exc:
+                last_exc = exc
+                print(f"WARNING: worker {sup.spec.instance}: initial start attempt "
+                      f"{attempt}/{max_attempts} failed: {exc}", flush=True)
+        raise SimFarmError(
+            f"worker {sup.spec.instance}: failed to start after {max_attempts} attempts"
+        ) from last_exc
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         errors = []
@@ -246,12 +328,23 @@ class SimFarm:
 
     # ------------------------------------------------------------------ run
 
-    def run(self) -> list[dict]:
+    def run(self, *, on_result=None, on_restart=None) -> list[dict]:
         """Flies every worker's share of episodes concurrently, restarting
         failures via WorkerSupervisor, and returns every summary collected
         (in arrival order, not per-worker order). Must be called inside the
         `with SimFarm(...) as farm:` block, after __enter__ has started the
-        workers' OS processes."""
+        workers' OS processes.
+
+        `on_result(record)`, if given, is called once per episode record
+        (real or a synthesized worker_restarted placeholder) as soon as it
+        lands; `on_restart(instance)` once per restart. Both exist so a long
+        run (M4 tasks 6/7's throughput sweep and soak test) can print live
+        per-episode progress instead of going silent for the run's whole
+        duration -- EpisodeRunner/SimFarm stay ignorant of what a caller does
+        with the callback, same pattern as EpisodeRunner's own on_step."""
+        self._progress_on_result = on_result
+        self._progress_on_restart = on_restart
+
         for sup in self.supervisors:
             self._spawn_worker(sup, start_index=0, n_episodes=self.n_episodes_per_worker,
                                 mission=self._mission, mission_digest=self._mission_digest,
@@ -262,6 +355,7 @@ class SimFarm:
             self._drain_queue()
             if all(not sup.process.is_alive() for sup in self.supervisors):
                 self._drain_queue()  # final drain after every child has exited
+                self.manifest.finalize(self._manifest_path)
                 break
             if time.monotonic() > deadline:
                 raise SimFarmError(
@@ -308,12 +402,74 @@ class SimFarm:
         proc.start()
         sup.process = proc
 
+    def _synthesize_lost_episode_record(self, sup: WorkerSupervisor) -> None:
+        """M4 task 4.2: the episode a dead child never got to report is not
+        silently dropped. Writes a valid=false, termination_reason=
+        worker_restarted placeholder for it via a standalone EpisodeLogger
+        (needs no rclpy, so this is safe to call from SimFarm's own parent
+        process) and appends it to self.results, then advances
+        _completed_per_worker so the NEXT spawned child's start_index skips
+        past this episode's id rather than overwriting the placeholder's
+        already-written parquet files.
+
+        A no-op when the worker had already cleanly finished its whole
+        quota before dying -- nothing was actually in flight to lose."""
+        instance = sup.spec.instance
+        completed = self._completed_per_worker[instance]
+        if completed >= self.n_episodes_per_worker:
+            return
+
+        from aero_bridge.episode_logger import EpisodeLogger
+        from experiments.episode_schema import FEATURE_VERSION_UNSET, SCHEMA_VERSION, TerminationReason, digest
+
+        episode_id = f"ep_{completed:04d}"
+        now_iso = _iso(time.time())
+        record = dict(
+            schema_version=SCHEMA_VERSION, run_id=self.run_id, episode_id=episode_id,
+            worker_id=instance, instance=instance, seed=self.seed_base + completed,
+            instance_spec_digest=digest(sup.spec.to_dict()), mission_id=self.mission_id,
+            mission_config_digest=self._mission_digest, feature_version=FEATURE_VERSION_UNSET,
+            env_versions=self._env_versions_json,
+            # The reset tier the dead child would actually have used for this
+            # episode isn't observable from this (parent) process -- record
+            # the run's configured tier rather than guessing at an escalation
+            # decision that only ever happens inside the child.
+            reset_tier=self.reset_tier,
+            termination_reason=TerminationReason.WORKER_RESTARTED.value, valid=False,
+            t_sim_start_s=0.0, t_sim_end_s=0.0, t_sim_duration_s=0.0,
+            t_wall_start_utc=now_iso, t_wall_end_utc=now_iso, t_wall_duration_s=0.0,
+            n_steps=0, waypoints_reached=0,
+            position_rmse_m=float('nan'), final_position_error_m=float('nan'),
+        )
+        EpisodeLogger(self.run_id, worker_id=instance, results_dir=self.results_dir).write_episode(record)
+        # Always newly-recorded in practice (the completed-quota guard above
+        # already prevents re-synthesizing the same index twice), but go
+        # through the same dedup-aware path as every other record rather
+        # than assuming that.
+        if self._record_result(record):
+            self._completed_per_worker[instance] += 1
+
     def _on_restart(self, sup: WorkerSupervisor, mission, mission_digest, env_versions_json) -> None:
         """ensure_healthy() already restarted the OS-level px4/gz/agent
-        processes and stopped the old child; this respawns a NEW child to
-        fly whatever episodes remain, continuing the episode index/seed
-        sequence rather than restarting it (see _worker_main's docstring)."""
-        self.restart_counts[sup.spec.instance] += 1
+        processes and stopped the old child. Before respawning a new child,
+        records the episode that was in flight (if any) as lost, and checks
+        whether this run's total restart rate has crossed the abort
+        threshold -- a run already over the threshold doesn't get one more
+        doomed worker started. The new child continues the episode
+        index/seed sequence rather than restarting it (see _worker_main's
+        docstring)."""
+        self._synthesize_lost_episode_record(sup)
+        self._record_restart(sup.spec.instance)
+
+        total_restarts = sum(self.restart_counts.values())
+        total_planned = self.worker_count * self.n_episodes_per_worker
+        if total_planned > 0 and total_restarts / total_planned > self.restart_rate_abort_threshold:
+            raise SimFarmError(
+                f"restart rate {total_restarts}/{total_planned} exceeded "
+                f"restart_rate_abort_threshold={self.restart_rate_abort_threshold} -- "
+                f"aborting rather than risk a dataset biased toward whichever fault "
+                f"severities crash workers more often (docs/parallelism.md §8)")
+
         remaining = self.n_episodes_per_worker - self._completed_per_worker[sup.spec.instance]
         if remaining > 0:
             self._spawn_worker(sup, start_index=self._completed_per_worker[sup.spec.instance],
@@ -328,11 +484,45 @@ class SimFarm:
             raise SimFarmError(str(exc)) from exc
         self._on_restart(sup, mission, mission_digest, env_versions_json)
 
+    def _record_result(self, record: dict) -> bool:
+        """Shared by _drain_queue (real episodes) and
+        _synthesize_lost_episode_record (placeholders): appends to
+        self.results, updates the manifest, and fires the progress callback
+        run() was given -- the single point every episode record passes
+        through, real or synthesized.
+
+        Returns True iff this record was newly recorded. Returns False, and
+        drops it, if this exact (worker_id, episode_id) was already
+        recorded -- the dedup that closes the queue race documented on
+        self._recorded_episode_ids in __init__: whichever of a synthesized
+        placeholder / a late-arriving real result gets here FIRST wins."""
+        key = (record["worker_id"], record["episode_id"])
+        if key in self._recorded_episode_ids:
+            print(f"WARNING: dropping duplicate episode record for worker "
+                  f"{record['worker_id']} {record['episode_id']} "
+                  f"(termination_reason={record['termination_reason']!r}) -- "
+                  f"already recorded; see sim_farm.py's queue-race note.", flush=True)
+            return False
+        self._recorded_episode_ids.add(key)
+        self.results.append(record)
+        self.manifest.record_episode(record)
+        self.manifest.write(self._manifest_path)
+        if self._progress_on_result is not None:
+            self._progress_on_result(record)
+        return True
+
+    def _record_restart(self, instance: int) -> None:
+        self.restart_counts[instance] += 1
+        self.manifest.record_restart(instance)
+        self.manifest.write(self._manifest_path)
+        if self._progress_on_restart is not None:
+            self._progress_on_restart(instance)
+
     def _drain_queue(self) -> None:
         while True:
             try:
                 summary = self._result_queue.get_nowait()
             except queue_module.Empty:
                 return
-            self.results.append(summary)
-            self._completed_per_worker[summary["worker_id"]] += 1
+            if self._record_result(summary):
+                self._completed_per_worker[summary["worker_id"]] += 1

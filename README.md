@@ -16,6 +16,12 @@
 
 [Overview](#overview) · [Research questions](#research-questions) · [Architecture](#architecture) · [Project status](#-project-status) · [Getting started](#getting-started) · [Roadmap](#roadmap)
 
+<br>
+
+<img src="docs/media/square_circuit_mission.gif" alt="PX4 SITL flying the square_circuit mission in Gazebo: takeoff, four-corner square, hover, land" width="560">
+
+<sub>The real M3 <code>square_circuit</code> mission (<a href="configs/missions/square_circuit.yaml">config</a>), flown through <code>EpisodeRunner</code> — the same code path every reported number in this project comes from, not a separate demo. 2× sped up.</sub>
+
 </div>
 
 ---

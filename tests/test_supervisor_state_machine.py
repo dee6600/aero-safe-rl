@@ -5,6 +5,7 @@ worker_<N>_heartbeat.json are written directly to a tmp_path run_dir to
 simulate PID/heartbeat state without a real process ever existing.
 """
 import json
+import signal
 import time
 
 import pytest
@@ -16,6 +17,7 @@ from experiments.worker_supervisor import (
     write_heartbeat,
 )
 from simulation.instance_spec import InstanceSpec
+from simulation.worker_process import WorkerProcessError
 
 
 def write_instance_json(run_dir, instance, *, pid_gz, pid_agent, pid_px4):
@@ -76,6 +78,9 @@ def test_stop_calls_worker_process_stop_and_child_terminate(tmp_path, monkeypatc
     monkeypatch.setattr("experiments.worker_supervisor.stop_worker",
                          lambda instance, run_dir: stop_calls.append(instance))
     spec = InstanceSpec.for_instance(1)
+    write_instance_json(tmp_path, 1, pid_gz=1, pid_agent=1, pid_px4=1)  # stop() only calls
+    # stop_worker when there's a tracked instance file -- see
+    # test_stop_is_a_noop_when_no_instance_file_exists for the no-file case.
     sup = WorkerSupervisor(spec, run_dir=str(tmp_path))
     sup.process = FakeProcess(alive=True)
     sup.stop()
@@ -93,6 +98,24 @@ def test_stop_is_a_noop_on_child_process_when_none_or_dead(tmp_path, monkeypatch
     sup.process = FakeProcess(alive=False)
     sup.stop()
     assert sup.process.terminate_calls == 0, "must not terminate an already-dead process"
+
+
+def test_stop_is_a_noop_when_no_instance_file_exists(tmp_path, monkeypatch):
+    """Found live (M4 tasks 6/7): a worker whose most recent restart ATTEMPT
+    itself failed (e.g. start_worker's own failure-cleanup already ran) has
+    no instance_<N>.json and nothing left running -- stop() must treat that
+    as already-stopped, not raise. This used to make SimFarm.__exit__ crash
+    an otherwise-finished run purely because one worker had already, and
+    correctly, ended up with nothing to stop."""
+    stop_worker_calls = []
+    monkeypatch.setattr("experiments.worker_supervisor.stop_worker",
+                         lambda instance, run_dir: stop_worker_calls.append(instance))
+    spec = InstanceSpec.for_instance(0)
+    sup = WorkerSupervisor(spec, run_dir=str(tmp_path))  # no instance_0.json ever written
+
+    sup.stop()  # must not raise
+
+    assert stop_worker_calls == [], "stop_worker (sim_stop.sh) must not even be invoked"
 
 
 # --------------------------------------------------------------------- pids
@@ -196,6 +219,99 @@ def test_supervisor_restart_marks_episode_invalid(tmp_path, monkeypatch):
     assert start_calls == [0]
     assert stop_calls == [0]
     assert sup.restart_count == 1
+
+
+def test_is_healthy_true_when_child_alive_even_if_instance_file_missing(tmp_path):
+    """The regression test for the real bug found live in M4 tasks 6/7's
+    first real hard reset: a worker's own child process legitimately has NO
+    instance_<N>.json for ~20s while it runs its own internal hard_reset()
+    (EpisodeRunner.run_episode() calls it directly, in the child). The old
+    is_healthy() treated that absence as "dead" and raced the child's own
+    in-flight reset with a second, redundant restart -- PX4 refused the
+    second start ("server already running"), which crashed the run and left
+    orphaned, untracked processes behind. No instance_0.json is written at
+    all here, simulating exactly that window."""
+    spec = InstanceSpec.for_instance(0)
+    sup = WorkerSupervisor(spec, run_dir=str(tmp_path))
+    sup.process = FakeProcess(alive=True)
+    write_heartbeat(0, str(tmp_path), last_odometry_wall_s=0.0)  # fresh
+
+    assert sup.is_healthy() is True
+
+
+def test_is_healthy_false_when_child_alive_but_heartbeat_stale_despite_missing_pids(tmp_path):
+    """The other half of the same fix: a live child is trusted over raw PID
+    presence, but NOT unconditionally -- a genuinely stuck child (heartbeat
+    stopped advancing) must still be caught, via the heartbeat, not via
+    PIDs. No instance_0.json here either, so this also confirms the PID
+    check isn't what's making this fail."""
+    spec = InstanceSpec.for_instance(0)
+    sup = WorkerSupervisor(spec, run_dir=str(tmp_path), heartbeat_stall_timeout_s=45.0)
+    sup.process = FakeProcess(alive=True)
+    heartbeat = tmp_path / "worker_0_heartbeat.json"
+    heartbeat.write_text(json.dumps({"t_wall": time.time() - 1000.0, "last_odometry_wall_s": 0.0}))
+
+    assert sup.is_healthy() is False
+
+
+def test_ensure_healthy_survives_a_failed_restart_attempt(tmp_path, monkeypatch):
+    """start() failing during a restart attempt (e.g. a genuinely stuck old
+    process, disk issue, whatever) must not crash the whole run with an
+    unhandled exception -- it's handled the same as every other restart
+    failure mode: counted against the budget, reported, and left for the
+    next health-poll cycle to retry. Found live: this used to propagate a
+    raw WorkerSupervisorError out of ensure_healthy() and take the entire
+    SimFarm run down."""
+    write_instance_json(tmp_path, 0, pid_gz=12345, pid_agent=12345, pid_px4=999999999)
+    monkeypatch.setattr("experiments.worker_supervisor.stop_worker", lambda instance, run_dir: None)
+
+    def failing_start(spec, run_dir):
+        raise WorkerProcessError("simulated: px4 exited during startup")
+
+    monkeypatch.setattr("experiments.worker_supervisor.start_worker", failing_start)
+    spec = InstanceSpec.for_instance(0)
+    sup = WorkerSupervisor(spec, run_dir=str(tmp_path), restart_budget=3)
+
+    restarted = sup.ensure_healthy()  # must not raise
+
+    assert restarted is True
+    assert sup.restart_count == 1
+
+
+def test_ensure_healthy_force_kills_a_pid_left_alive_after_stop(tmp_path, monkeypatch, alive_pid):
+    """Found live (M4 tasks 6/7, worker_count>=3 under heavy CPU load):
+    stop_worker() can return -- successfully or with a swallowed failure --
+    while one of the three OS processes it was supposed to kill is still
+    actually alive. Left alone, that permanently leaks an untracked process
+    that blocks every FUTURE start attempt for this same instance (a real
+    gz sim + MicroXRCEAgent pair was found still running, and still holding
+    the instance's UDP port, minutes after the "restart" that was supposed
+    to replace them). ensure_healthy() must verify and force-kill anything
+    still alive rather than trusting stop_worker()."""
+    write_instance_json(tmp_path, 0, pid_gz=999999999, pid_agent=alive_pid, pid_px4=999999999)
+    monkeypatch.setattr("experiments.worker_supervisor.stop_worker", lambda instance, run_dir: None)
+    monkeypatch.setattr("experiments.worker_supervisor.start_worker", lambda spec, run_dir: None)
+    killed = []
+
+    def fake_kill(pid, sig):
+        # os.kill is also how _pid_alive() PROBES liveness (sig=0) -- this
+        # fake must keep that working correctly (999999999 "dead", alive_pid
+        # "alive") in addition to recording the real SIGKILL this test cares
+        # about, or _pid_alive() itself silently breaks for every caller.
+        if pid == 999999999:
+            raise ProcessLookupError()
+        if sig == 0:
+            return
+        killed.append((pid, sig))
+
+    monkeypatch.setattr("experiments.worker_supervisor.os.kill", fake_kill)
+    spec = InstanceSpec.for_instance(0)
+    sup = WorkerSupervisor(spec, run_dir=str(tmp_path))
+
+    sup.ensure_healthy()
+
+    assert killed == [(alive_pid, signal.SIGKILL)], \
+        "only the still-alive pid must be force-killed, not the already-dead ones"
 
 
 def test_restart_budget_exhausted_raises(tmp_path, monkeypatch):

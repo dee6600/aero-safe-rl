@@ -162,6 +162,26 @@ class EpisodeRunner:
         reset_wall_duration_s = 0.0
 
         if reset_tier != "none":
+            if on_step is not None:
+                # A synthetic "still alive" heartbeat right before a reset
+                # starts -- not a real step, not logged via the schema-
+                # validated _on_step below, only the supervisor's heartbeat
+                # side effect. Found live (M4 task 7's soak test): a reset
+                # writes no heartbeat while it runs (heartbeats only happen
+                # per flight control tick), so the LAST heartbeat before a
+                # hard reset can already be seconds old by the time the
+                # reset starts; under contention (worker_count>=4) a reset
+                # occasionally took long enough for that stale timestamp to
+                # cross heartbeat_stall_timeout_s, making WorkerSupervisor's
+                # health check conclude the child was dead and restart it
+                # ON TOP of its own still-in-progress reset -- burning
+                # through the worker's restart budget on false positives.
+                # Marking "reset just started, right now" as the heartbeat's
+                # new baseline gives the health check the FULL timeout
+                # window measured from the actual start of the slow
+                # operation, not from whenever the last flight tick happened
+                # to be.
+                on_step({"t_wall_utc": time.time()})
             if reset_tier == "soft":
                 r = soft_reset(self.node, self.px4, self.clock, self.spec)
             elif reset_tier == "medium":
@@ -193,7 +213,13 @@ class EpisodeRunner:
             instance_spec_digest=self.spec_digest, mission_id=self.mission_id,
             mission_config_digest=self.mission_digest, feature_version=self.feature_version,
             env_versions=self.env_versions_json, reset_tier=tier_used,
-            termination_reason=result.termination_reason, valid=True,
+            termination_reason=result.termination_reason,
+            # Every outcome except sim_fault is a real, trustworthy measurement --
+            # even offboard_lost/episode_timeout/aborted_error are genuine flight
+            # data. sim_fault means the simulation state itself broke (§8), so
+            # that one alone is invalidated here; worker_restarted's invalid
+            # record is synthesized separately by SimFarm, never reaches here.
+            valid=(result.termination_reason != TerminationReason.SIM_FAULT.value),
             t_sim_start_s=t_sim_start, t_sim_end_s=t_sim_end,
             t_sim_duration_s=t_sim_end - t_sim_start,
             t_wall_start_utc=_iso(t_wall_start), t_wall_end_utc=_iso(t_wall_end),

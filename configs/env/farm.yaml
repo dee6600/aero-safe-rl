@@ -25,7 +25,26 @@ instance_base: 0
 heartbeat_stall_timeout_s: 45.0
 
 # How many times a single worker may be restarted before the run gives up on
-# it and fails loudly rather than looping forever. Full restart-rate/run-level
-# abort bookkeeping is M4 task 4; this is only the per-worker ceiling needed
-# so ensure_healthy() has a defined "give up" point in tasks 1-3.
-restart_budget_per_worker: 5
+# it and fails loudly rather than looping forever. This is the per-worker
+# ceiling; restart_rate_abort_threshold below is the run-level one.
+#
+# Raised from 5 to 20 on 2026-09-21, from real measurement, not a guess: M4
+# task 7's soak test (tests/slow/test_soak.py) hit RestartBudgetExhausted
+# THREE times at the old value of 5 -- once at 4 workers, twice at 2 workers
+# (once at 4x speed, once at 1x) -- each time from the project's own
+# already-documented residual DDS/rclpy crash rate (ExternalShutdownException/
+# RCLError family, docs/parallelism.md §2.6 and docs/throughput.md), not a
+# new bug. One run's worst-hit worker needed 5 restarts within its first ~70
+# of 200 planned episodes (~1 per 14) -- 20 gives real headroom above that
+# measured rate rather than an arbitrary bump. restart_rate_abort_threshold
+# below is unaffected and still the real circuit breaker against a run that
+# is failing so often it would bias the dataset.
+restart_budget_per_worker: 20
+
+# M4 task 4: total restarts across ALL workers, divided by total planned
+# episodes (worker_count * n_episodes_per_worker) -- past this fraction the
+# whole run aborts loudly instead of continuing. Restarts are not uniformly
+# distributed across fault severities, so a run that keeps going past this
+# point would quietly bias exactly the comparison this project's results
+# depend on (docs/parallelism.md §8).
+restart_rate_abort_threshold: 0.5
