@@ -953,6 +953,18 @@ buffer exist, since this document's numbers are physics-only; give
 
 # M4 — Parallel evaluation farm + episode runner  ⭐ new
 
+**Tasks 1–3 done (2026-09-21).** `EpisodeRunner`, `WorkerSupervisor` and
+`SimFarm` exist and are verified against two real concurrent workers,
+including `pgrep -cf "^gz sim "` reading 2 live during the run. Tasks 4
+(structured failure handling), 5 (run manifest), 6 (throughput sweep), 7
+(soak test) and 8 (CPU affinity, conditional) remain — see the per-task marks
+below and the progress log entry for full detail, including two real bugs
+found and fixed along the way: a stale heartbeat file surviving across runs
+caused a spurious restart and a duplicated episode, and an unrelated
+pre-existing `.gitignore` bug (its unanchored `env/` rule also silently
+matched `configs/env/`, hiding this task's own `configs/env/farm.yaml` from
+every future commit) was found and fixed while adding that file.
+
 > **Rescoped 2026-09-21 (D12).** This was a *training* farm: millions of steps,
 > 4 workers, gating whether M9 was possible. Training moved to Isaac, so this is
 > now an **evaluation** farm — hundreds of episodes per condition cell. What
@@ -979,35 +991,57 @@ rather than on the happy path.
 
 ### Tasks
 
-1. **`EpisodeRunner` — one class, one episode, one worker.**
+1. ✅ **`EpisodeRunner` — one class, one episode, one worker.**
    Takes an `InstanceSpec`, a mission config, a fault config (null for now, wired
    in M6) and a seed. Returns a validated episode record. It owns: reset →
    arm → fly → terminate → log. It does **not** own process lifecycle.
    Everything above M4 — dataset generation, evaluation, the Gym env — is a
    caller of this class. There must be exactly one.
-2. **`WorkerSupervisor` — owns one worker's processes.**
+   Absorbed M3's `run_episodes.py`-internal `_Worker` class; `run_episodes.py`
+   now calls `EpisodeRunner` instead of duplicating its logic. Fault config
+   wiring is still a null-op pending M6, as scoped.
+2. ✅ **`WorkerSupervisor` — owns one worker's processes.**
    Start, health-check, stop, restart. Health checks come from
    `docs/parallelism.md` §8: PIDs alive, telemetry not stalled, DDS link up.
    Exposes `ensure_healthy()` which restarts and returns whether a restart
    happened, so the caller can invalidate the in-flight episode.
-3. **`SimFarm` — owns N supervisors.**
+   Telemetry-staleness and DDS-link checks are done via a heartbeat file the
+   worker's child process writes every control tick, since the health check
+   itself runs in the parent (no rclpy there, per CLAUDE.md §3.3) — see
+   `experiments/worker_supervisor.py`'s module docstring.
+3. ✅ **`SimFarm` — owns N supervisors.**
    Deterministic worker→instance assignment. Starts all, waits for all ready
    (with a per-worker timeout, and a hard failure if any never comes up), hands
    out work, restarts failures, aggregates restart counts into the run manifest.
    Context manager: leaving the block stops everything, including on exception.
-4. **Structured failure handling.**
+   Restart counts are tracked (`SimFarm.restart_counts`) but not yet written
+   into a run manifest -- that file itself is task 5.
+4. ⬜ **Structured failure handling.**
    1. `termination_reason` enum extended with the failure modes from
-      `docs/parallelism.md` §8.
-   2. Episodes ended by worker failure are written with `valid=false` and a
-      reason, never silently discarded.
-   3. Restart budget per worker; exceeding it fails the run loudly.
-   4. A run-level abort if the global restart rate exceeds a configured
+      `docs/parallelism.md` §8. **Partly done as part of tasks 1-3**: schema
+      bumped to v2, `worker_restarted` and `offboard_lost` added (the minimum
+      those tasks' own required tests needed — see the progress log). Still
+      missing: `sim_fault` and any other remaining §8 rows.
+   2. ⬜ Episodes ended by worker failure are written with `valid=false` and a
+      reason, never silently discarded. **Known gap, called out explicitly in
+      `experiments/sim_farm.py`'s module docstring**: when `ensure_healthy()`
+      restarts a worker mid-episode, that episode's result is currently just
+      never produced (not silently marked invalid — restart_counts makes the
+      event visible — but not written as a record either). Closing this is
+      this sub-task's job.
+   3. ⬜ Restart budget per worker; exceeding it fails the run loudly. *(The
+      per-worker ceiling itself already exists —
+      `WorkerSupervisor.restart_budget` / `RestartBudgetExhausted`, driven by
+      `configs/env/farm.yaml`'s `restart_budget_per_worker` — built as part of
+      tasks 1-3 since the required test `test_restart_budget_exhausted_raises`
+      needed it. What remains here is the run-level view across workers.)*
+   4. ⬜ A run-level abort if the global restart rate exceeds a configured
       threshold — a biased dataset is worse than no dataset.
-5. **Run manifest.** `results/<run_id>/manifest.json`: run id, git SHA of this
+5. ⬜ **Run manifest.** `results/<run_id>/manifest.json`: run id, git SHA of this
    repo, PX4 SHA, config digests, seeds, worker→instance map, versions from
    `env_report.sh`, start/end time, episode counts by outcome, restart counts.
    Written incrementally so a killed run still leaves a readable manifest.
-6. **Throughput measurement — the number M9 is budgeted from.**
+6. ⬜ **Throughput measurement — the number M9 is budgeted from.**
    One drone per world, always (D7 — settled, not reopened here). Sweep worker
    count ∈ {1, 2, 3, 4} × speed factor ∈ {1, 2, 4, 8}. Record per configuration:
    **aggregate simulated-seconds per wall-second** (the number that actually
@@ -1021,69 +1055,96 @@ rather than on the happy path.
    one condition under which sharing a world between drones would be worth
    reconsidering — but that is a decision to make from real numbers if it ever
    comes up, not something to pre-build a topology system for now.)
-7. **Soak test.** 4 workers × 100 episodes at the chosen operating point,
+7. ⬜ **Soak test.** 4 workers × 100 episodes at the chosen operating point,
    unattended, no manual intervention. Zero orphan processes at the end. Memory
    flat, not growing.
-8. **CPU affinity (only if task 6 shows contention).** Pin each worker's px4 and
+8. ⬜ **CPU affinity (only if task 6 shows contention).** Pin each worker's px4 and
    gz processes to disjoint core sets with `taskset`, leaving cores for the
    learner. Measure before and after; keep it only if it actually helps.
 
 ### Files created
 
 ```
-experiments/episode_runner.py
-experiments/worker_supervisor.py
-experiments/sim_farm.py
-experiments/run_manifest.py
-experiments/benchmark_throughput.py
-configs/env/farm.yaml
-docs/throughput.md
+experiments/episode_runner.py         ✅
+experiments/worker_supervisor.py      ✅
+experiments/sim_farm.py               ✅
+simulation/worker_process.py          ✅ (not originally listed -- extracted
+                                          from aero_bridge/reset.py's hard_reset()
+                                          to avoid a second start/stop implementation;
+                                          see the progress log)
+experiments/run_manifest.py           ⬜ task 5
+experiments/benchmark_throughput.py   ⬜ task 6
+configs/env/farm.yaml                 ✅ (built ahead of task 6, since tasks
+                                          1-3 already needed worker-count/
+                                          restart-budget/heartbeat-timeout
+                                          config-driven per CLAUDE.md principle 4)
+docs/throughput.md                    ⬜ task 6
 ```
 
 ### Tests (required)
 
 ```
-tests/test_sim_farm_assignment.py
-tests/test_supervisor_state_machine.py
-tests/test_run_manifest.py
-tests/sim/test_two_workers.py       (@pytest.mark.sim)
-tests/sim/test_worker_restart.py    (@pytest.mark.sim)
-tests/slow/test_soak.py             (@pytest.mark.slow)
+tests/test_sim_farm_assignment.py       ✅
+tests/test_supervisor_state_machine.py  ✅
+tests/test_episode_runner.py            ✅ (not originally listed -- covers
+                                            next_reset_tier(), the one pure-
+                                            function piece of EpisodeRunner's
+                                            own logic; "unit-test-each-milestone")
+tests/test_run_manifest.py              ⬜ task 5
+tests/sim/test_two_workers.py       ✅ (@pytest.mark.sim)
+tests/sim/test_worker_restart.py    ⬜ task 4 (@pytest.mark.sim)
+tests/slow/test_soak.py             ⬜ task 7 (@pytest.mark.slow)
 ```
 
-- `test_worker_to_instance_is_deterministic` — worker k always gets instance
+- ✅ `test_worker_to_instance_is_deterministic` — worker k always gets instance
   k+base, across processes and runs.
-- `test_no_resource_collision_for_n_workers` — for N up to 8, no two workers
+- ✅ `test_no_resource_collision_for_n_workers` — for N up to 8, no two workers
   share a port, domain, partition, namespace or model name.
-- `test_farm_stops_all_on_exception` — an exception inside the context manager
+- ✅ `test_farm_stops_all_on_exception` — an exception inside the context manager
   still stops every worker (use fake supervisors; no simulator).
-- `test_supervisor_restart_marks_episode_invalid` — a simulated process death
-  produces `valid=false` with the right `termination_reason`.
-- `test_restart_budget_exhausted_raises` — exceeding the budget fails loudly.
-- `test_manifest_readable_after_kill` — a partially written manifest still
-  parses.
-- `test_two_workers_fly_concurrently` (sim) — two workers each complete a full
+- ✅ `test_supervisor_restart_marks_episode_invalid` — a simulated process death
+  produces `valid=false` with the right `termination_reason`. *(Written against
+  `WorkerSupervisor.ensure_healthy()`'s own contract -- the return-value signal
+  a caller uses to mark an episode invalid. `SimFarm` actually building that
+  invalid record for the lost in-flight episode is task 4.2's job, not yet done.)*
+- ✅ `test_restart_budget_exhausted_raises` — exceeding the budget fails loudly.
+- ⬜ `test_manifest_readable_after_kill` — a partially written manifest still
+  parses. (task 5)
+- ✅ `test_two_workers_fly_concurrently` (sim) — two workers each complete a full
   M3 mission at the same time; both records validate; the two vehicles' logs are
   distinguishable and neither contains the other's data. **This is the test that
-  catches cross-wiring.**
-- `test_worker_restart_recovers` (sim) — `kill -9` a worker's px4 mid-episode;
-  the farm restarts it and the next episode succeeds.
-- `test_soak_4x100` (slow) — 400 episodes, zero orphans, flat memory.
+  catches cross-wiring.** *(Passed on the real simulator, twice concurrently,
+  with `pgrep -cf "^gz sim "` confirmed reading 2 live during the run. Both
+  episodes ended `episode_timeout` rather than `completed` in the verification
+  run — consistent with the known, pre-existing M2 concurrent-worker
+  `offboard_control_signal_lost` gap, `docs/parallelism.md` §2.6, not a new
+  bug; the test deliberately does not require `completed` for exactly this
+  reason.)*
+- ⬜ `test_worker_restart_recovers` (sim) — `kill -9` a worker's px4 mid-episode;
+  the farm restarts it and the next episode succeeds. (task 4)
+- ⬜ `test_soak_4x100` (slow) — 400 episodes, zero orphans, flat memory. (task 7)
 
 ### Done when
 
-- [ ] N workers run concurrently, fully isolated
-      (`pgrep -cf "^gz sim "` == N)
+- [x] N workers run concurrently, fully isolated
+      (`pgrep -cf "^gz sim "` == N) — confirmed live with N=2
 - [ ] Killing one worker's PX4 mid-episode restarts only that worker; the others
-      keep flying and their episodes remain valid
-- [ ] 4 × 100 episodes complete unattended with zero orphan processes
-- [ ] Peak RSS recorded and within budget; no growth across the soak
+      keep flying and their episodes remain valid — `ensure_healthy()`/restart
+      exists and is unit-tested, but not yet proven against a real `kill -9`
+      (task 4's `test_worker_restart_recovers`, sim-marked)
+- [ ] 4 × 100 episodes complete unattended with zero orphan processes (task 7)
+- [ ] Peak RSS recorded and within budget; no growth across the soak (task 7)
 - [ ] `docs/throughput.md` states the chosen (worker count, speed factor)
-      operating point and the aggregate throughput it delivers
+      operating point and the aggregate throughput it delivers (task 6)
 - [ ] Every episode record carries a valid `termination_reason`; invalid
-      episodes are recorded, not dropped
-- [ ] The run manifest reproduces the run's configuration completely
-- [ ] Interrupting the farm with Ctrl-C leaves nothing running
+      episodes are recorded, not dropped — schema/enum support exists (v2);
+      `SimFarm` synthesizing the invalid record for a worker-restart-lost
+      episode is task 4.2, not yet done
+- [ ] The run manifest reproduces the run's configuration completely (task 5)
+- [x] Interrupting the farm with Ctrl-C leaves nothing running —
+      `SimFarm.__exit__` stops every worker unconditionally, including on
+      exception, verified by `test_farm_stops_all_on_exception` and
+      `test_exit_attempts_every_stop_even_if_one_fails`
 
 ### Verify with
 
@@ -1505,7 +1566,7 @@ Update this as milestones complete.
 | M2 | **Substantially done** | 2026-08-21 | `PX4Interface` made instance-aware, fixing the two known bugs (hardcoded `target_system=1`, hardcoded `/fmu/out/...`), each with a bug-catching test. Added `PX4Clock`, `arming_sequence.py` (arm/hold/land primitives, typed exceptions), and `simulation/sim_clock.py` (`GzSimClock`). **Major correction found during implementation**: `px4_msgs` timestamps are NOT simulated time — they track wall clock regardless of speed factor (`uxrce_dds_client` resync); `GzSimClock` reads Gazebo's clock directly instead. **One item deliberately left open**: concurrent two-worker flights hit a real, confirmed `offboard_control_signal_lost` failure at ~35-65% (vs ~10-20% solo) — extensively investigated via `.ulg` log analysis and loop instrumentation; battery failsafe and `GzSimClock`'s background thread were tested and ruled out as causes; the loss occurs in the BEST_EFFORT transport, not application code. A partial mitigation (offboard re-engage on loss) roughly halves the failure rate. Full writeup and open status: `docs/parallelism.md` §2.6. 87 unit tests, all passing, 3s. |
 | M3 | **Done** | 2026-08-21 | *(This row previously read "Not started", which was stale — the milestone's own checkboxes, its ✅ header and `docs/baseline_results.md` all recorded it as complete. Corrected 2026-09-21.)* 20/20 healthy missions over two runs. **Noise floor: position RMSE 6.44 ± 0.57 m** over 40 episodes. **Divergence band at fixed seed: σ = 0.083 m RMSE** following hard reset — this is the project's reproducibility tolerance (D11). Episode schema frozen and validated on every write. Two new PX4-under-Gazebo limitations found: repeated `gz set_pose` teleports permanently trip the compass consistency check, and `PREFLIGHT_REBOOT_SHUTDOWN` (medium reset) never recovers post-flight. Net effect: **soft reset measurably leaks state** (~10× hard reset's spread) and medium reset is unusable, so budget **hard reset (~19.8 s)** between episodes. Full detail: `docs/baseline_results.md`. |
 | M3b | **Done** | 2026-09-21 | Isaac Sim 5.1.0 + Isaac Lab (`~/projects/IsaacLab`, commit `b0542fe2d`) confirmed headless on this GPU. Throughput sweep 64→32,768 envs: VRAM never near the 8 GB ceiling (peak 6.8 GB), **host RAM is the real constraint** (peak 13.6/15.8 GB at 32,768). Chosen operating point **8,192 envs**: 546k env-steps/s, 41% VRAM, 41% RAM — sized with headroom for M8b's future policy/optimizer/buffer overhead, not yet measured. 10-minute sustained run at that point: no memory growth (6,437.7 MB vs. 6,439.3 MB burst-test RSS), no errors. Gate (~1M steps within a few hours) clears in **under 2 seconds** of sim time — the old plan's #1 risk is resolved. One real blocker fixed: Isaac's interactive EULA prompt hangs non-interactive shells forever; fixed with `OMNI_KIT_ACCEPT_EULA=YES`, needs a permanent home in an Isaac `activate.sh` counterpart. Full detail: `docs/isaac_feasibility.md`. |
-| M4 | Not started | | **Rescoped 2026-09-21 (D12)**: now a parallel *evaluation* farm, not a training farm. Gates M6 and M10; the M9 gate moved to M3b. |
+| M4 | **Tasks 1-3 done** | 2026-09-21 | **Rescoped 2026-09-21 (D12)**: now a parallel *evaluation* farm, not a training farm. Gates M6 and M10; the M9 gate moved to M3b. `EpisodeRunner`, `WorkerSupervisor`, `SimFarm` built and verified against 2 real concurrent workers (`pgrep -cf "^gz sim "` == 2 confirmed live; zero orphans after; 136 no-sim unit tests pass). Absorbed M3's `run_episodes.py`-internal `_Worker` into `EpisodeRunner`; extracted `simulation/worker_process.py` out of `aero_bridge/reset.py`'s `hard_reset()` so starting/stopping a worker's OS processes has exactly one implementation. Schema bumped to v2 (`worker_restarted`, `offboard_lost` added) and `arming_sequence.py` gained a distinct `OffboardLost` exception, separating "hold timed out while genuinely stuck" from "hold timed out because PX4 never came back from an offboard drop" -- the latter being the M2-documented concurrent-worker DDS gap (`docs/parallelism.md` §2.6), which the verification run's two workers both hit (`termination_reason=episode_timeout`, not a new bug -- see the test's own note). **One real bug found and fixed**: a heartbeat file surviving in the shared `run_dir` across runs made a perfectly healthy, still-flying worker look stale to `ensure_healthy()`, triggering a spurious restart and a duplicated episode (3 results for 2 workers) on first attempt; fixed by clearing a worker's heartbeat file at the start of `WorkerSupervisor.start()`. Tasks 4 (full structured-failure handling), 5 (run manifest), 6 (throughput sweep), 7 (soak test) and 8 (CPU affinity) remain -- see the milestone's own task list for exact status. |
 | M5 | Not started | | Was M4. |
 | M6 | Not started | | Was M5. |
 | M7 | Not started | | Was M6. |

@@ -134,7 +134,9 @@ tolerance (**σ = 0.083 m** at fixed seed after hard reset) — see
 feasibility) passed comfortably** — 546k env-steps/s at the chosen operating
 point (8,192 parallel envs), no memory growth over a 10-minute sustained run;
 host RAM, not GPU VRAM, is this machine's real constraint (see
-[`docs/isaac_feasibility.md`](docs/isaac_feasibility.md)). **M4 is next.** See
+[`docs/isaac_feasibility.md`](docs/isaac_feasibility.md)). **M4 tasks 1-3
+done** — `EpisodeRunner`, `WorkerSupervisor`, `SimFarm` built and verified
+against 2 real concurrent workers (tasks 4-8 remain). See
 [`milestones.md`](milestones.md) for the full task-by-task build log and
 [`docs/`](docs/) for measured numbers.
 
@@ -146,7 +148,7 @@ host RAM, not GPU VRAM, is this machine's real constraint (see
 | M2 | ROS 2 talks to PX4 | ✅ Done (one open reliability item, §2.6) |
 | M3 | Autonomous mission baseline + episode contract | ✅ Done |
 | M3b | **Isaac Lab feasibility spike** | ✅ Done — passed comfortably, see `docs/isaac_feasibility.md` |
-| M4 | **Parallel evaluation farm + episode runner** | ⬜ Not started |
+| M4 | **Parallel evaluation farm + episode runner** | 🟡 Tasks 1-3 done, 4-8 remaining |
 | M5 | Telemetry feature pipeline | ⬜ Not started |
 | M6 | Fault injection + dataset | ⬜ Not started |
 | M7 | AI fault detector | ⬜ Not started |

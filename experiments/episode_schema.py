@@ -22,7 +22,7 @@ from typing import Any, Mapping
 import yaml
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "configs" / "schema" / "episode_record.yaml"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # M5 has not been built yet, but the schema requires feature_version on every
 # record so M5 does not need to migrate an already-written field into
@@ -33,14 +33,19 @@ FEATURE_VERSION_UNSET = "unversioned"
 
 class TerminationReason(str, enum.Enum):
     """Closed enum -- extend deliberately, never write a free-text reason
-    (CLAUDE.md anti-pattern 16)."""
+    (CLAUDE.md anti-pattern 16).
+
+    WORKER_RESTARTED and OFFBOARD_LOST were added in schema v2 (M4 tasks
+    1-3) -- see configs/schema/episode_record.yaml's module comment."""
     COMPLETED = "completed"
     PREFLIGHT_FAILED = "preflight_failed"
     ARM_TIMEOUT = "arm_timeout"
     OFFBOARD_REJECTED = "offboard_rejected"
+    OFFBOARD_LOST = "offboard_lost"
     HOLD_TIMEOUT = "hold_timeout"
     LAND_TIMEOUT = "land_timeout"
     EPISODE_TIMEOUT = "episode_timeout"
+    WORKER_RESTARTED = "worker_restarted"
     ABORTED_ERROR = "aborted_error"
 
 

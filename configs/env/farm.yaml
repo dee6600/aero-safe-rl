@@ -1,0 +1,31 @@
+# SimFarm / WorkerSupervisor configuration (M4 tasks 1-3). Config-driven per
+# CLAUDE.md principle 4 -- worker count and instance assignment are values a
+# caller picks per run, not constants baked into experiments/sim_farm.py.
+#
+# M4 task 6's throughput sweep will use this same file's worker_count /
+# speed_factor as its sweep axes' defaults; the sweep itself and
+# docs/throughput.md are a later session's work.
+
+farm_config_version: "1"
+
+# Default number of concurrent workers. D12's rescope note: 2 is the sane
+# default for an *evaluation* farm (M4 is no longer sized for RL training).
+default_worker_count: 2
+
+# Worker k gets instance (instance_base + k) -- a pure function, never a
+# free-port/free-domain search (CLAUDE.md anti-pattern 6).
+instance_base: 0
+
+# Wall-clock seconds since the last heartbeat update before
+# WorkerSupervisor.ensure_healthy() treats a worker as stalled and restarts
+# it. Generous relative to the ~10Hz per-step heartbeat write rate
+# (mission_executor.CONTROL_RATE_HZ) so normal reset-tier pauses (soft reset:
+# ~0.6s measured in M3; hard reset: ~19.8s measured in M3) don't themselves
+# look like a stall.
+heartbeat_stall_timeout_s: 45.0
+
+# How many times a single worker may be restarted before the run gives up on
+# it and fails loudly rather than looping forever. Full restart-rate/run-level
+# abort bookkeeping is M4 task 4; this is only the per-worker ceiling needed
+# so ensure_healthy() has a defined "give up" point in tasks 1-3.
+restart_budget_per_worker: 5

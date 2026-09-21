@@ -70,7 +70,19 @@ class OffboardRejected(FlightSequenceError):
 
 
 class HoldTimeout(FlightSequenceError):
-    """hold_position_until's condition never became true within the deadline."""
+    """hold_position_until's condition never became true within the deadline,
+    while PX4 stayed in OFFBOARD throughout -- a stuck hold, not an offboard
+    drop. See OffboardLost for the latter."""
+
+
+class OffboardLost(FlightSequenceError):
+    """hold_position_until's deadline was hit while PX4 was NOT in OFFBOARD --
+    the re-engagement this function already attempts (module docstring,
+    docs/parallelism.md §2.6) did not recover in time. Distinguished from
+    HoldTimeout because this is the project's own confirmed, understood
+    concurrent-worker DDS reliability gap, not a stuck controller or a
+    genuinely new problem -- M4's WorkerSupervisor records it as a normal
+    "retry, don't crash the run" outcome rather than a crash."""
 
 
 class LandTimeout(FlightSequenceError):
@@ -191,6 +203,11 @@ def hold_position_until(node, px4: PX4Interface, clock: PX4Clock, *,
             return
 
         if now > wall_deadline:
+            if not _is_offboard(status):
+                raise OffboardLost(
+                    f"timed out waiting to {description} within {timeout_s}s, "
+                    f"still not in OFFBOARD despite re-engagement attempts; "
+                    f"failing flags: {_failing_flags(px4)}")
             raise HoldTimeout(
                 f"timed out waiting to {description} within {timeout_s}s; "
                 f"failing flags: {_failing_flags(px4)}")

@@ -75,3 +75,15 @@ def sim_workers_0_1():
     _sim_start(1)
     yield (0, 1)
     _sim_stop_all()
+
+
+@pytest.fixture
+def clean_sim_slate():
+    """Guarantees nothing is running before AND after a test, but starts
+    nothing itself -- for M4's SimFarm, which does its own starting via
+    WorkerSupervisor (sim_start.sh internally refuses to start an instance
+    that's already running, so a test using SimFarm must not pre-start with
+    sim_worker/sim_workers_0_1)."""
+    _sim_stop_all()
+    yield
+    _sim_stop_all()

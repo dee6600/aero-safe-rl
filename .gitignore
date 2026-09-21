@@ -3,9 +3,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# Conda / venv (env lives outside the repo, but ignore if ever created locally)
+# Conda / venv (env lives outside the repo, but ignore if ever created locally).
+# Anchored to the repo root (leading /) -- an unanchored "env/" also matched
+# configs/env/ at any depth, which silently hid configs/env/farm.yaml (M4)
+# from git entirely. Found live while adding that file.
 .venv/
-env/
+/env/
 
 # ROS 2 / colcon
 build/

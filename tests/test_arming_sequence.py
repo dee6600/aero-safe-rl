@@ -9,7 +9,7 @@ import pytest
 from px4_msgs.msg import VehicleStatus
 
 from aero_bridge.arming_sequence import (
-    ArmTimeout, HoldTimeout, LandTimeout, OffboardRejected, PreflightFailed,
+    ArmTimeout, HoldTimeout, LandTimeout, OffboardLost, OffboardRejected, PreflightFailed,
     _failing_flags, _is_armed, _is_offboard,
     arm_and_engage_offboard, hold_position_until, land_and_wait,
 )
@@ -179,6 +179,12 @@ def test_hold_position_until_reengages_offboard_when_lost():
     must re-issue the offboard-engage command, not just keep streaming and
     hope. This is the test that would catch a regression removing the fix
     documented in docs/parallelism.md.
+
+    Offboard never recovers in this fake (unlike a real re-engage, nothing
+    here flips it back to True), so the deadline is hit while still outside
+    OFFBOARD -- exactly the case M4 (schema v2) gave its own exception,
+    OffboardLost, distinct from a stuck-but-still-offboard HoldTimeout. See
+    test_hold_position_until_raises_hold_timeout for that other case.
     """
     px4 = FakePX4(status=make_status(armed=True, offboard=True))
     calls = [0]
@@ -190,11 +196,33 @@ def test_hold_position_until_reengages_offboard_when_lost():
             px4.latest['vehicle_status'] = make_status(armed=True, offboard=False)
 
     clock = make_clock(pump)
-    with pytest.raises(HoldTimeout):
+    with pytest.raises(OffboardLost):
         hold_position_until(None, px4, clock, x=0, y=0, z=-5.0,
                             is_reached=lambda: False, timeout_s=0.05,
                             description="test")
     assert px4.engage_calls >= 1, "must re-issue engage_offboard_mode after losing offboard"
+
+
+def test_hold_position_until_raises_hold_timeout_when_offboard_recovers_in_time():
+    """The other half of the OffboardLost/HoldTimeout split: offboard drops
+    mid-wait but comes back (as a real re-engage normally would) before the
+    deadline -- the eventual timeout is then a genuine stuck hold, not an
+    offboard-loss outcome, so it must still raise plain HoldTimeout."""
+    px4 = FakePX4(status=make_status(armed=True, offboard=True))
+    calls = [0]
+
+    def pump(_t):
+        calls[0] += 1
+        if calls[0] == 5:
+            px4.latest['vehicle_status'] = make_status(armed=True, offboard=False)
+        elif calls[0] == 10:
+            px4.latest['vehicle_status'] = make_status(armed=True, offboard=True)
+
+    clock = make_clock(pump)
+    with pytest.raises(HoldTimeout):
+        hold_position_until(None, px4, clock, x=0, y=0, z=-5.0,
+                            is_reached=lambda: False, timeout_s=0.05,
+                            description="test")
 
 
 def test_hold_position_until_does_not_reengage_while_still_offboard():

@@ -52,7 +52,6 @@ because there is nothing to add to that.
 """
 from __future__ import annotations
 
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +64,7 @@ from aero_bridge.px4_interface import PX4Interface
 from experiments.episode_schema import ResetTier
 from simulation import sim_clock  # import side effect: gz Python bindings on sys.path
 from simulation.instance_spec import InstanceSpec
+from simulation.worker_process import WorkerProcessError, start_worker, stop_worker
 
 import gz.transport13 as _gz_transport
 from gz.msgs10.boolean_pb2 import Boolean as _GzBoolean
@@ -242,9 +242,10 @@ def medium_reset(node, px4: PX4Interface, clock: PX4Clock, spec: InstanceSpec, *
 
 def hard_reset(spec: InstanceSpec, *, run_dir: Optional[str] = None,
                repo_dir: Path = REPO_DIR, timeout_s: float = HARD_RESET_WALL_TIMEOUT_S) -> ResetResult:
-    """Full worker restart via scripts/sim_stop.sh + scripts/sim_start.sh.
-    Always correct, regardless of the vehicle's prior state -- the only tier
-    safe to call with no telemetry at all (e.g. after a dead DDS link).
+    """Full worker restart via simulation.worker_process (scripts/sim_stop.sh +
+    scripts/sim_start.sh). Always correct, regardless of the vehicle's prior
+    state -- the only tier safe to call with no telemetry at all (e.g. after
+    a dead DDS link).
 
     Unlike soft_reset/medium_reset, this does not take (or reuse) a node,
     PX4Interface or PX4Clock: those belong to the OLD PX4 process, which no
@@ -253,21 +254,11 @@ def hard_reset(spec: InstanceSpec, *, run_dir: Optional[str] = None,
     only the processes and their PIDs are new).
     """
     t0 = time.monotonic()
-    extra = ["--run-dir", run_dir] if run_dir else []
-
-    stop = subprocess.run(
-        [str(repo_dir / "scripts" / "sim_stop.sh"), "-i", str(spec.instance), *extra],
-        capture_output=True, text=True, timeout=timeout_s / 2)
-    if stop.returncode != 0:
-        raise ResetError(f"hard_reset: sim_stop.sh failed:\n{stop.stdout}\n{stop.stderr}")
-
-    remaining = max(timeout_s - (time.monotonic() - t0), 10.0)
-    start = subprocess.run(
-        [str(repo_dir / "scripts" / "sim_start.sh"),
-         "-i", str(spec.instance), "-w", spec.world, "-m", spec.model,
-         "-s", str(spec.speed_factor), *extra],
-        capture_output=True, text=True, timeout=remaining)
-    if start.returncode != 0:
-        raise ResetError(f"hard_reset: sim_start.sh failed:\n{start.stdout}\n{start.stderr}")
+    try:
+        stop_worker(spec.instance, run_dir=run_dir, repo_dir=repo_dir, timeout_s=timeout_s / 2)
+        remaining = max(timeout_s - (time.monotonic() - t0), 10.0)
+        start_worker(spec, run_dir=run_dir, repo_dir=repo_dir, timeout_s=remaining)
+    except WorkerProcessError as exc:
+        raise ResetError(f"hard_reset: {exc}") from exc
 
     return ResetResult(tier=ResetTier.HARD.value, wall_duration_s=time.monotonic() - t0)

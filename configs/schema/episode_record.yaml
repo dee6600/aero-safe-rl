@@ -10,21 +10,27 @@
 # (tests/test_episode_schema.py::test_termination_reason_enum_closed) pins
 # the two representations equal so they cannot silently drift apart.
 
-schema_version: "1"
+schema_version: "2"
 
 # Closed enum. A record's termination_reason must be exactly one of these.
-# Extend deliberately when a milestone adds a real new outcome (M4 adds
-# worker-failure reasons, M6 adds fault-related ones) -- never write a
-# free-text reason (CLAUDE.md anti-pattern 16).
+# Extend deliberately when a milestone adds a real new outcome -- never write
+# a free-text reason (CLAUDE.md anti-pattern 16).
+#
+# v2 (M4 tasks 1-3) added worker_restarted and offboard_lost -- the minimum
+# needed for this session's own required tests, per docs/parallelism.md §8's
+# failure catalogue. The rest of §8 (sim_fault, restart-budget bookkeeping) is
+# M4 task 4's job, not this one.
 termination_reasons:
   - completed          # all waypoints reached, final hover held, landed and disarmed
   - preflight_failed    # PX4 never reported pre_flight_checks_pass=True
   - arm_timeout          # preflight passed but PX4 never confirmed ARMED
   - offboard_rejected     # armed but PX4 never reached NAVIGATION_STATE_OFFBOARD
-  - hold_timeout          # a waypoint/hover hold's wall-clock watchdog elapsed
-  - land_timeout           # land commanded but PX4 never confirmed DISARMED
-  - episode_timeout        # the mission's own sim-time budget elapsed first
-  - aborted_error           # an exception outside the typed flight-sequence errors
+  - offboard_lost          # OFFBOARD engaged, then nav_state left it unexpectedly mid-flight
+  - hold_timeout            # a waypoint/hover hold's wall-clock watchdog elapsed
+  - land_timeout             # land commanded but PX4 never confirmed DISARMED
+  - episode_timeout           # the mission's own sim-time budget elapsed first
+  - worker_restarted            # supervisor detected a dead PID/stalled telemetry and restarted the worker mid-episode
+  - aborted_error                # an exception outside the typed flight-sequence errors
 
 # Closed enum for the tier of reset applied before this episode's flight.
 # "none" is the one legitimate value for the first episode flown on a

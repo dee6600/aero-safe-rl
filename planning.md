@@ -3,7 +3,10 @@
 **Planning document — roadmap only. No implementation.**
 
 Status: Phases 0–1, 1b and 3 done; Phase 2 substantially done with one open
-reliability item (`docs/parallelism.md` §2.6). Phase 4 next.
+reliability item (`docs/parallelism.md` §2.6). Phase 3b done (Isaac Lab
+feasibility, passed). Phase 4 tasks 1–3 done (`EpisodeRunner`,
+`WorkerSupervisor`, `SimFarm`, verified against 2 concurrent real workers);
+tasks 4–8 remain — see `milestones.md` M4.
 
 **Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
 GPU-parallel **NVIDIA Isaac Lab** environment; PX4-in-the-loop (Gazebo) remains
