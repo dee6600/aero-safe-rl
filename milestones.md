@@ -39,20 +39,21 @@ This reverses D6 and supersedes D5. Rationale and architecture:
 
 What this changes here:
 
-- **New M3b** — Isaac Lab feasibility spike. Measures whether Isaac runs
-  usefully on this GPU. **Gates everything Isaac.** Do this first.
+- **M3b — Isaac Lab feasibility spike — ✅ done, passed comfortably.** Sample
+  budget (the old plan's #1 risk) is resolved: 546k env-steps/s at the chosen
+  operating point (8,192 parallel envs), no memory growth over a 10-minute
+  sustained run. Host RAM, not GPU VRAM, turned out to be this machine's real
+  constraint. Full numbers: `docs/isaac_feasibility.md`.
 - **New M8b** — the Isaac Lab training environment.
 - **M4 is rescoped** from a training farm to an *evaluation* farm — hundreds
-  of episodes, 2 workers, not millions of steps. Its gate on M9 moves to M3b.
-  This also defuses the open `offboard_control_signal_lost` issue.
+  of episodes, 2 workers, not millions of steps. Its gate on M9 moved to M3b,
+  which has now cleared it. This also defuses the open
+  `offboard_control_signal_lost` issue.
 - **M9** trains in Isaac, evaluates on PX4, and gains the RQ5 transfer table.
 - **M5 and M6 gain one constraint each** — see those milestones.
 - **Nothing measured so far is invalidated.** The M3 noise floor, the
   divergence band, and every multi-instance finding still stand, and the
   ROS 2 ↔ PX4 layer is untouched.
-- **Blocked right now:** the NVIDIA kernel module (580.173.02) and NVML
-  userspace (580.178) disagree, so CUDA is unavailable. A reboot is expected
-  to fix it. M3b cannot start until it does.
 
 Last revised: 2026-09-21.
 
@@ -217,7 +218,7 @@ discovering its bugs underneath a training run in M9.
 | M1b | Simulator addendum: isolation + ownership | 2 d | **Medium** | D7–D10 |
 | M2 | ROS 2 talks to PX4 | 4 d | **Medium** | instance identity |
 | M3 | Autonomous mission baseline + episode contract | 1 wk | Low | episode schema |
-| M3b | **Isaac Lab feasibility spike** ⭐ | 1 d | **High** | D12 — gates all Isaac work |
+| M3b | **Isaac Lab feasibility spike** ✅ | 1 d | Low (resolved) | D12 — gates all Isaac work |
 | M4 | **Parallel evaluation farm + episode runner** | 1 wk | Medium | everything above M3 |
 | M5 | Telemetry feature pipeline | 4 d | Low | feature contract |
 | M6 | Fault injection + dataset | 1.5 wk | **High** | the farm |
@@ -881,7 +882,7 @@ skip validation "for speed".
 ```
 
 ---
-# M3b — Isaac Lab feasibility spike  ⭐ new (D12)
+# M3b — Isaac Lab feasibility spike ✅
 
 **Goal:** find out by measurement whether Isaac Lab runs usefully on this
 machine, **before** any part of the plan depends on it.
@@ -895,28 +896,58 @@ this measurement is a guess, and the wrong place to discover it is M9.
 
 **Depends on:** a working CUDA install. **Blocks:** M8b, M9.
 
-**Blocked right now.** The NVIDIA kernel module (580.173.02) and NVML userspace
-(580.178) disagree: `nvidia-smi` fails and `torch.cuda.is_available()` is
-`False`. A reboot is expected to fix it. Verify with `nvidia-smi` before
-starting.
+**Result: PASSED, comfortably.** Full numbers, method, and reasoning:
+`docs/isaac_feasibility.md`. Summary — Isaac Sim 5.1.0 launches headless and
+runs the stock `Isaac-Quadcopter-Direct-v0` task; a throughput sweep from 64 to
+32,768 parallel envs found VRAM was never close to the 8 GB ceiling (peak
+6.8 GB at 32,768) and **host RAM, not GPU memory, is this machine's actual
+constraint** (peak 13.6 GB of 15.8 GB at 32,768). Chosen operating point:
+**8,192 envs** — 546k env-steps/s, 41% VRAM, 41% RAM, chosen with headroom to
+spare for the policy network/optimizer/rollout buffer a real PPO loop adds on
+top of pure physics stepping (not yet measured — see M8b follow-up below). A
+10-minute sustained run at that operating point (40,000 steps) showed **no
+memory growth** (peak RSS 6,437.7 MB vs. 6,439.3 MB in a 4.5-second burst test
+of the same config) and no errors. The gate — deliver ~1M steps within a few
+hours — clears in **under 2 seconds** of raw simulation time at the chosen
+operating point. Sample budget, the old plan's #1 risk, is resolved.
 
-**Key deliverables:**
-- Isaac Sim 5.1.0 (already pip-installed in the `isaacsim` conda env) confirmed
-  to launch **headless** and step a physics scene with no rendering.
-- Isaac Lab installed into that same env; one stock quadrotor task run.
-- A measured table: env count ∈ {64, 256, 1024, 4096} × {steps/sec, VRAM, host
-  RAM}, plus the largest env count stable for 10 minutes with no OOM.
-- `docs/isaac_feasibility.md` stating the chosen operating point.
+One real blocker hit and fixed along the way: Isaac Sim's first import prompts
+an interactive EULA acceptance that hangs forever non-interactively
+(`Unable to bootstrap inner kit kernel: EOF when reading a line`). Fixed with
+`export OMNI_KIT_ACCEPT_EULA=YES` before any Isaac invocation — needs a home in
+an Isaac counterpart to `scripts/activate.sh` before the next session hits it.
 
-**Gate — the whole point of this milestone.** If the best stable configuration
-cannot deliver roughly 1 M environment steps in a few hours, **stop and
-revisit D12.** The options then are a cloud GPU for training runs, or reverting
-to PX4-in-the-loop training under M4's original budget. Both are acceptable;
-finding out during M9 is not.
+**What was and wasn't tested at 10-minute duration.** The sustained stability
+run was at 8,192 envs (the chosen operating point), not at the largest count
+that completed without error (32,768, tested only as a short burst). This is
+intentional, not an oversight — 32,768 leaves too little RAM headroom once a
+real training loop's memory is added on top of physics-only stepping, so it
+was never a candidate operating point regardless of its burst-test result.
 
-**Watch out for:** treating a successful *launch* as a successful *spike*.
-Isaac starting up proves nothing about whether it sustains thousands of envs on
-8 GB. The deliverable is the table, not a screenshot.
+**Key deliverables — status:**
+- ✅ Isaac Sim 5.1.0 launches headless and steps a physics scene with no rendering.
+- ✅ Isaac Lab installed (cloned to `~/projects/IsaacLab`, sibling to
+  `PX4-Autopilot` — not inside this repo, matching the project's existing
+  convention for vendored external dependencies); stock quadrotor task run.
+- ✅ Measured table: env count ∈ {64, 256, 1024, 4096, 8192, 16384, 32768} ×
+  {steps/sec, VRAM, host RAM} — wider than the originally planned {64, 256,
+  1024, 4096}, extended because throughput kept climbing well past 4096 and
+  the real ceiling turned out to matter for choosing the operating point.
+  Largest count run without error: 32,768. Largest count stability-tested for
+  10 minutes: 8,192 (see above for why these differ).
+- ✅ `docs/isaac_feasibility.md` written, stating the chosen operating point.
+
+**No new unit tests for this milestone.** Unlike M5–M9, M3b introduces no
+pure-function logic of this project's own — it is a measurement spike against
+a third-party simulator, and its only deliverable is the measured table and
+the written record of it. The standing "every milestone ships tests" rule
+applies to logic this project owns; there is none here to test.
+
+**Follow-ups carried into M8b** (recorded in `docs/isaac_feasibility.md` too):
+commit the benchmark scripts into `isaac/` if M8b needs to re-run the sweep;
+re-measure memory headroom once the real training loop's network/optimizer/
+buffer exist, since this document's numbers are physics-only; give
+`OMNI_KIT_ACCEPT_EULA=YES` a permanent home.
 
 ---
 
@@ -1473,7 +1504,7 @@ Update this as milestones complete.
 | M1b | **Done** | 2026-08-20 | `simulation/instance_spec.py` is now the single source of instance identity (41 unit tests, 0.04 s, no simulator). `sim_start.sh` rewritten: own Gazebo server per worker via `GZ_PARTITION` + `PX4_GZ_STANDALONE`, `setsid` process groups, topic-based readiness, `instance_<N>.json` handshake. `sim_stop.sh` is PID-based per worker; the name-based sweep moved behind `--sweep`. New `sim_status.sh` and `activate.sh`. Verified with two concurrent workers holding independent speed factors, isolated shutdown, and a deliberate failure injection. Also found and fixed a fourth silent multi-instance trap: PX4's shell client only honours `--instance N` as `argv[1]` (`main.cpp:154`), so `px4-param set X 0 --instance 1` silently configures instance 0 and reports success — it had shipped in `fly_demo.py` and briefly in `sim_start.sh`, with the symptom "instance 1 arms but never takes off". Now guarded by a static scan (`tests/test_px4_cli_usage.py`) and `NAV_DLL_ACT` is read back after writing. Added `scripts/watch_worlds.sh`: N isolated worlds, one GUI window each, all drones flown concurrently. |
 | M2 | **Substantially done** | 2026-08-21 | `PX4Interface` made instance-aware, fixing the two known bugs (hardcoded `target_system=1`, hardcoded `/fmu/out/...`), each with a bug-catching test. Added `PX4Clock`, `arming_sequence.py` (arm/hold/land primitives, typed exceptions), and `simulation/sim_clock.py` (`GzSimClock`). **Major correction found during implementation**: `px4_msgs` timestamps are NOT simulated time — they track wall clock regardless of speed factor (`uxrce_dds_client` resync); `GzSimClock` reads Gazebo's clock directly instead. **One item deliberately left open**: concurrent two-worker flights hit a real, confirmed `offboard_control_signal_lost` failure at ~35-65% (vs ~10-20% solo) — extensively investigated via `.ulg` log analysis and loop instrumentation; battery failsafe and `GzSimClock`'s background thread were tested and ruled out as causes; the loss occurs in the BEST_EFFORT transport, not application code. A partial mitigation (offboard re-engage on loss) roughly halves the failure rate. Full writeup and open status: `docs/parallelism.md` §2.6. 87 unit tests, all passing, 3s. |
 | M3 | **Done** | 2026-08-21 | *(This row previously read "Not started", which was stale — the milestone's own checkboxes, its ✅ header and `docs/baseline_results.md` all recorded it as complete. Corrected 2026-09-21.)* 20/20 healthy missions over two runs. **Noise floor: position RMSE 6.44 ± 0.57 m** over 40 episodes. **Divergence band at fixed seed: σ = 0.083 m RMSE** following hard reset — this is the project's reproducibility tolerance (D11). Episode schema frozen and validated on every write. Two new PX4-under-Gazebo limitations found: repeated `gz set_pose` teleports permanently trip the compass consistency check, and `PREFLIGHT_REBOOT_SHUTDOWN` (medium reset) never recovers post-flight. Net effect: **soft reset measurably leaks state** (~10× hard reset's spread) and medium reset is unusable, so budget **hard reset (~19.8 s)** between episodes. Full detail: `docs/baseline_results.md`. |
-| M3b | Not started | | **New milestone (D12)**: Isaac Lab feasibility spike. **Gates all Isaac work.** Blocked until a reboot clears the NVIDIA kernel-module/NVML mismatch. |
+| M3b | **Done** | 2026-09-21 | Isaac Sim 5.1.0 + Isaac Lab (`~/projects/IsaacLab`, commit `b0542fe2d`) confirmed headless on this GPU. Throughput sweep 64→32,768 envs: VRAM never near the 8 GB ceiling (peak 6.8 GB), **host RAM is the real constraint** (peak 13.6/15.8 GB at 32,768). Chosen operating point **8,192 envs**: 546k env-steps/s, 41% VRAM, 41% RAM — sized with headroom for M8b's future policy/optimizer/buffer overhead, not yet measured. 10-minute sustained run at that point: no memory growth (6,437.7 MB vs. 6,439.3 MB burst-test RSS), no errors. Gate (~1M steps within a few hours) clears in **under 2 seconds** of sim time — the old plan's #1 risk is resolved. One real blocker fixed: Isaac's interactive EULA prompt hangs non-interactive shells forever; fixed with `OMNI_KIT_ACCEPT_EULA=YES`, needs a permanent home in an Isaac `activate.sh` counterpart. Full detail: `docs/isaac_feasibility.md`. |
 | M4 | Not started | | **Rescoped 2026-09-21 (D12)**: now a parallel *evaluation* farm, not a training farm. Gates M6 and M10; the M9 gate moved to M3b. |
 | M5 | Not started | | Was M4. |
 | M6 | Not started | | Was M5. |

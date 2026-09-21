@@ -494,7 +494,7 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
 
 ---
 
-### Phase 3b — Isaac Lab feasibility spike
+### Phase 3b — Isaac Lab feasibility spike ✅
 **Effort: ~1 day — added 2026-09-21; gates everything D12 depends on**
 
 - **Goal** — Find out, by measurement, whether Isaac Lab runs usefully on this
@@ -504,23 +504,33 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
   15 GB RAM. Turing has RT cores so it is not excluded outright, and a headless
   physics-only workload is far cheaper than the full application — but "far
   cheaper" is not a number. D12 without this measurement is a guess.
+- **Result: passed, comfortably.** Full numbers and method:
+  `docs/isaac_feasibility.md`. VRAM was never near the 8 GB ceiling at any
+  scale tested (peak 6.8 GB at 32,768 parallel envs); **host RAM turned out to
+  be this machine's real constraint** (peak 13.6/15.8 GB at 32,768). Chosen
+  operating point — 8,192 envs — delivers 546k env-steps/s at 41% VRAM / 41%
+  RAM, with no memory growth over a 10-minute sustained run. The gate (below)
+  clears in under 2 seconds of simulated time. Sample budget, §7.4's old #1
+  risk, is resolved rather than merely mitigated.
 - **Deliverables**
-  - Isaac Sim 5.1.0 (already pip-installed in the `isaacsim` env) confirmed to
-    launch **headless**, with no rendering, and step a physics scene.
-  - Isaac Lab installed, and one stock quadrotor task run.
-  - **Measured table**: environment count ∈ {64, 256, 1024, 4096} × {steps per
-    second, VRAM used, host RAM used}, and the largest env count that is stable
-    for 10 minutes without an OOM.
-  - Written to `docs/isaac_feasibility.md` with the chosen operating point.
-- **Prerequisite** — CUDA works. As of 2026-09-21 it does not: the NVIDIA
-  kernel module (580.173.02) and NVML userspace (580.178) disagree, so
-  `nvidia-smi` fails and `torch.cuda.is_available()` is `False`. A reboot is
-  expected to resolve it; nothing here can be attempted until it does.
-- **Validation / gate** — If the best stable configuration cannot deliver
-  roughly 1 M environment steps within a few hours, **stop and reconsider D12
-  before building Phase 8b.** The options at that point are a cloud GPU for
-  training runs, or reverting to PX4-in-the-loop training under the old Phase 4
-  budget. Either is fine; discovering it at Phase 9 is not.
+  - ✅ Isaac Sim 5.1.0 (pip-installed in the `isaacsim` env) launches
+    **headless**, with no rendering, and steps a physics scene.
+  - ✅ Isaac Lab installed (cloned to `~/projects/IsaacLab`, sibling to
+    `PX4-Autopilot` — outside this repo, per this project's existing
+    convention for vendored dependencies); the stock `Isaac-Quadcopter-Direct-v0`
+    task run.
+  - ✅ **Measured table**, widened beyond the originally planned {64, 256,
+    1024, 4096} to {..., 8192, 16384, 32768} once throughput kept climbing
+    past 4096: steps/sec, VRAM, host RAM at each. Largest count run without
+    error: 32,768 (burst only). Largest count stability-tested for 10 minutes:
+    8,192 — the chosen operating point, deliberately smaller than the largest
+    working count because it leaves headroom for a real training loop's
+    network/optimizer/buffer, which this spike does not include.
+  - ✅ Written to `docs/isaac_feasibility.md` with the chosen operating point.
+- **One real blocker hit and fixed**: Isaac Sim's first import prompts an
+  interactive EULA acceptance that hangs forever non-interactively. Fixed with
+  `OMNI_KIT_ACCEPT_EULA=YES`; needs a permanent home in an Isaac counterpart to
+  `scripts/activate.sh` before the next session hits the same hang.
 
 ---
 

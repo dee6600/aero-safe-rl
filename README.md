@@ -131,8 +131,12 @@ caused by this project's own code (full writeup:
 project's noise floor (position RMSE **6.44 ± 0.57 m**) and its reproducibility
 tolerance (**σ = 0.083 m** at fixed seed after hard reset) — see
 [`docs/baseline_results.md`](docs/baseline_results.md). **M3b (Isaac Lab
-feasibility) is next.** See [`milestones.md`](milestones.md) for the full
-task-by-task build log and [`docs/`](docs/) for measured numbers.
+feasibility) passed comfortably** — 546k env-steps/s at the chosen operating
+point (8,192 parallel envs), no memory growth over a 10-minute sustained run;
+host RAM, not GPU VRAM, is this machine's real constraint (see
+[`docs/isaac_feasibility.md`](docs/isaac_feasibility.md)). **M4 is next.** See
+[`milestones.md`](milestones.md) for the full task-by-task build log and
+[`docs/`](docs/) for measured numbers.
 
 | # | Milestone | Status |
 |---|---|---|
@@ -141,7 +145,7 @@ task-by-task build log and [`docs/`](docs/) for measured numbers.
 | M1b | Worker isolation, ownership, identity | ✅ Done |
 | M2 | ROS 2 talks to PX4 | ✅ Done (one open reliability item, §2.6) |
 | M3 | Autonomous mission baseline + episode contract | ✅ Done |
-| M3b | **Isaac Lab feasibility spike** | ⬜ Not started — gates all Isaac work |
+| M3b | **Isaac Lab feasibility spike** | ✅ Done — passed comfortably, see `docs/isaac_feasibility.md` |
 | M4 | **Parallel evaluation farm + episode runner** | ⬜ Not started |
 | M5 | Telemetry feature pipeline | ⬜ Not started |
 | M6 | Fault injection + dataset | ⬜ Not started |
@@ -168,9 +172,12 @@ task-by-task build log and [`docs/`](docs/) for measured numbers.
 > have taken days per run) and adds RQ5, which measures the resulting
 > sim-to-sim gap rather than assuming it away. Two milestones were added,
 > **M3b** (feasibility — this machine is below Isaac Sim's stated minimum, so
-> it is measured before anything depends on it) and **M8b** (the training
-> environment). Nothing already measured is invalidated. Full rationale:
-> [`planning.md` §3.1](planning.md).
+> it was measured before anything depended on it: **passed**, 546k
+> env-steps/s at the chosen operating point, host RAM rather than GPU VRAM
+> turned out to be the real constraint) and **M8b** (the training
+> environment, not yet built). Nothing already measured is invalidated. Full
+> rationale: [`planning.md` §3.1](planning.md); feasibility numbers:
+> [`docs/isaac_feasibility.md`](docs/isaac_feasibility.md).
 
 <details>
 <summary><b>What's actually been verified so far</b></summary>
