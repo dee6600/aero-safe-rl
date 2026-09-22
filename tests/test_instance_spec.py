@@ -217,3 +217,60 @@ def test_px4_env_is_complete():
     assert env["PX4_SIM_SPEED_FACTOR"] == "4"
     assert env["GZ_PARTITION"] == "aero_1"
     assert env["PX4_GZ_MODEL_POSE"] == "0,0,0,0,0,0"
+    # x500 itself is deliberately NOT overridden -- PX4's own rcS already
+    # finds 4001_gz_x500 by name for it (see _AUTOSTART_OVERRIDE_FOR_MODEL's
+    # docstring).
+    assert "PX4_SYS_AUTOSTART" not in env
+
+
+def test_px4_env_sets_sys_autostart_for_models_px4_cannot_find_by_name():
+    """M6: x500_aero is a project-local gz model with no matching PX4
+    airframe FILE, so PX4's rcS (ROMFS/px4fmu_common/init.d-posix/rcS) would
+    otherwise fail with "Unknown model ... (not found by name)" before ever
+    reaching px4-rc.gzsim's spawn logic -- confirmed live. PX4_SYS_AUTOSTART
+    makes rcS skip that by-name lookup and reuse x500's own airframe
+    (4001_gz_x500) directly, with zero changes to PX4's own tree."""
+    env = InstanceSpec.for_instance(0, model="x500_aero").px4_env()
+    assert env["PX4_SIM_MODEL"] == "gz_x500_aero"
+    assert env["PX4_SYS_AUTOSTART"] == "4001"
+
+
+def test_px4_env_sets_gz_model_name_for_project_local_models():
+    """px4-rc.gzsim's own spawn logic hardcodes a PX4_GZ_MODELS-relative
+    path (confirmed live, M6) and can never find a project-local model --
+    PX4_GZ_MODEL_NAME tells it to attach to a model the launcher already
+    spawned itself instead."""
+    env = InstanceSpec.for_instance(2, model="x500_aero").px4_env()
+    assert env["PX4_GZ_MODEL_NAME"] == "x500_aero_2"
+
+
+def test_px4_env_does_not_set_gz_model_name_for_stock_x500():
+    env = InstanceSpec.for_instance(0).px4_env()
+    assert "PX4_GZ_MODEL_NAME" not in env
+
+
+# ------------------------------------------------------ gz_spawn_request
+
+
+def test_gz_spawn_request_identity_pose_gives_identity_quaternion():
+    spec = InstanceSpec.for_instance(0, model="x500_aero")
+    req = spec.gz_spawn_request("/tmp/x500_aero/model.sdf")
+    assert 'name: "x500_aero_0"' in req
+    assert "allow_renaming: false" in req
+    assert 'x: 0.0, y: 0.0, z: 0.0, w: 1.0' in req or "x: 0, y: 0, z: 0, w: 1" in req
+
+
+def test_gz_spawn_request_uses_absolute_sdf_path():
+    spec = InstanceSpec.for_instance(0, model="x500_aero")
+    req = spec.gz_spawn_request("relative/model.sdf")
+    assert 'sdf_filename: "' in req
+    # Must not embed the relative path as-given -- gz sim's own working
+    # directory is not this repo's, so a relative path would silently
+    # resolve against the wrong base.
+    assert '"relative/model.sdf"' not in req
+
+
+def test_gz_spawn_request_encodes_nonzero_pose():
+    spec = InstanceSpec.for_instance(0, model="x500_aero", spawn_pose=(1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
+    req = spec.gz_spawn_request("/tmp/model.sdf")
+    assert "x: 1.0, y: 2.0, z: 3.0" in req

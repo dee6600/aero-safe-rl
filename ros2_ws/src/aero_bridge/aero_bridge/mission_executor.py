@@ -262,6 +262,12 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
             accel_z_m_s2=sensors.accelerometer_m_s2[2],
             motor_0_output=motor_outputs[0], motor_1_output=motor_outputs[1],
             motor_2_output=motor_outputs[2], motor_3_output=motor_outputs[3],
+            # Straight passthrough of PX4's own FailureDetector bitmask
+            # (VehicleStatus.msg -- already subscribed, no new topic; schema
+            # v4, M6 task 2). Interpretation (e.g. "was FAILURE_MOTOR ever
+            # set during this episode") happens at the caller, same
+            # raw-telemetry-only convention M5 used for attitude/rate/accel.
+            px4_failure_detector_status=int(status.failure_detector_status),
         )
         state["step_index"] += 1
         steps.append(row)

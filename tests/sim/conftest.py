@@ -27,11 +27,11 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.sim)
 
 
-def _sim_start(instance: int, speed: float = 4) -> None:
-    r = subprocess.run(
-        [str(REPO / 'scripts/sim_start.sh'), '-i', str(instance), '-s', str(speed)],
-        capture_output=True, text=True, timeout=180,
-    )
+def _sim_start(instance: int, speed: float = 4, model: str | None = None) -> None:
+    cmd = [str(REPO / 'scripts/sim_start.sh'), '-i', str(instance), '-s', str(speed)]
+    if model:
+        cmd += ['-m', model]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         pytest.fail(f"sim_start.sh -i {instance} failed:\n{r.stdout}\n{r.stderr}")
 
@@ -74,6 +74,19 @@ def sim_workers_0_1():
     _sim_start(0)
     _sim_start(1)
     yield (0, 1)
+    _sim_stop_all()
+
+
+@pytest.fixture
+def sim_worker_x500_aero():
+    """One headless worker at instance 0, started with the M6 rotor-fault
+    model instead of stock x500. Separate from `sim_worker` rather than a
+    parametrised version of it -- most sim tests want plain x500, and this
+    fixture's failure mode (the plugin/model not loading) should never be
+    confused with a plain-x500 flight problem."""
+    _sim_stop_all()
+    _sim_start(0, model="x500_aero")
+    yield 0
     _sim_stop_all()
 
 

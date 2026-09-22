@@ -93,6 +93,125 @@ def _farm_with_fakes(monkeypatch, n=2, **fake_kwargs):
     return farm
 
 
+# ------------------------------------------------- M6 task 9: fault_specs
+
+def test_fault_specs_by_worker_wrong_worker_count_raises(monkeypatch):
+    from experiments.fault_schedule import FaultSpec
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    with pytest.raises(ValueError, match="fault_specs_by_worker"):
+        SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=3,
+                fault_specs_by_worker=[[FaultSpec.healthy(i) for i in range(3)]])  # only 1 entry, need 2
+
+
+def test_fault_specs_by_worker_wrong_episode_count_raises(monkeypatch):
+    from experiments.fault_schedule import FaultSpec
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    with pytest.raises(ValueError, match="fault_specs_by_worker\\[1\\]"):
+        SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=3,
+                fault_specs_by_worker=[
+                    [FaultSpec.healthy(i) for i in range(3)],
+                    [FaultSpec.healthy(i) for i in range(2)],  # wrong length for this worker
+                ])
+
+
+def test_spawn_worker_passes_this_workers_own_fault_specs_slice(monkeypatch):
+    from experiments.fault_schedule import FaultProfile, FaultSpec, FaultType
+
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    specs_by_worker = [
+        [FaultSpec.healthy(i) for i in range(2)],
+        [FaultSpec(episode_index=i, fault_applied=True,
+                    fault_type=FaultType.ROTOR_THRUST_DEGRADATION,
+                    rotor_index=1, severity=0.5, onset_time_s=1.0, profile=FaultProfile.STEP,
+                    ramp_duration_s=0.0) for i in range(2)],
+    ]
+    farm = SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=2,
+                    enable_rotor_fault=True, fault_specs_by_worker=specs_by_worker,
+                    fault_config_digest="digest123")
+    farm.supervisors = [FakeSupervisor(k) for k in range(2)]
+
+    captured_args = []
+
+    class _FakeProcess:
+        def __init__(self, target, args, daemon):
+            captured_args.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(farm._ctx, "Process", _FakeProcess)
+
+    farm._spawn_worker(farm.supervisors[0], start_index=0, n_episodes=2,
+                        mission=farm._mission, mission_digest=farm._mission_digest,
+                        env_versions_json=farm._env_versions_json)
+    farm._spawn_worker(farm.supervisors[1], start_index=0, n_episodes=2,
+                        mission=farm._mission, mission_digest=farm._mission_digest,
+                        env_versions_json=farm._env_versions_json)
+
+    # args tuple order: (..., result_queue, enable_rotor_fault, fault_specs, fault_config_digest)
+    assert captured_args[0][-3] is True  # enable_rotor_fault
+    assert captured_args[0][-2] == specs_by_worker[0]
+    assert captured_args[0][-1] == "digest123"
+    assert captured_args[1][-2] == specs_by_worker[1]
+    assert captured_args[1][-2] is not captured_args[0][-2]
+
+
+def test_resume_seeds_completed_per_worker_from_existing_files(monkeypatch, tmp_path):
+    """M6: a run killed mid-flight leaves worker_<k>/episode_ep_NNNN_summary.parquet
+    files on disk -- resume=True must pick up each worker's own next unused
+    index from the highest one present, not restart at 0."""
+    import pandas as pd
+
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    run_id = "resume_test"
+    for worker_id, indices in ((0, [0, 1, 2, 3]), (1, [0, 1])):
+        worker_dir = tmp_path / run_id / f"worker_{worker_id}"
+        worker_dir.mkdir(parents=True)
+        for i in indices:
+            pd.DataFrame([{"x": i}]).to_parquet(worker_dir / f"episode_ep_{i:04d}_summary.parquet")
+
+    farm = SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=10,
+                    run_id=run_id, resume=True, results_dir=str(tmp_path))
+    assert farm._completed_per_worker == {0: 4, 1: 2}
+
+
+def test_resume_with_no_existing_files_starts_at_zero(monkeypatch, tmp_path):
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    farm = SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=10,
+                    run_id="brand_new_run", resume=True, results_dir=str(tmp_path))
+    assert farm._completed_per_worker == {0: 0, 1: 0}
+
+
+def test_resume_without_run_id_raises(monkeypatch):
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    with pytest.raises(ValueError, match="resume=True requires"):
+        SimFarm(worker_count=2, mission_id="square_circuit", n_episodes_per_worker=10,
+                resume=True)
+
+
+def test_run_skips_spawning_a_worker_already_at_full_quota(monkeypatch, tmp_path):
+    """The edge case a resumed run can hit: one worker already finished its
+    whole quota before the interruption. run() must not crash on
+    sup.process being None for that worker."""
+    import pandas as pd
+
+    monkeypatch.setattr("experiments.sim_farm.capture_env_versions", lambda: {"stub": True})
+    run_id = "resume_full_quota_test"
+    worker_dir = tmp_path / run_id / "worker_0"
+    worker_dir.mkdir(parents=True)
+    for i in range(3):
+        pd.DataFrame([{"x": i}]).to_parquet(worker_dir / f"episode_ep_{i:04d}_summary.parquet")
+
+    farm = SimFarm(worker_count=1, mission_id="square_circuit", n_episodes_per_worker=3,
+                    run_id=run_id, resume=True, results_dir=str(tmp_path))
+    assert farm._completed_per_worker == {0: 3}
+    farm.supervisors = [FakeSupervisor(0)]
+
+    with farm:
+        results = farm.run()
+    assert results == []  # nothing left to fly; must not crash on sup.process is None
+
+
 def test_enter_starts_every_worker(monkeypatch):
     farm = _farm_with_fakes(monkeypatch, n=3)
     with farm:

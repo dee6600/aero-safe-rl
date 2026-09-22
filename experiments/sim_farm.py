@@ -78,7 +78,7 @@ from experiments.worker_supervisor import (
     WorkerSupervisorError,
     write_heartbeat,
 )
-from simulation.instance_spec import InstanceSpec
+from simulation.instance_spec import DEFAULT_MODEL, InstanceSpec
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -105,13 +105,21 @@ def worker_instance(k: int, instance_base: int) -> int:
 def _worker_main(spec: InstanceSpec, mission_id: str, mission: dict, mission_digest: str,
                   env_versions_json: str, n_episodes: int, start_index: int, seed_base: int,
                   reset_tier: str, run_id: str, results_dir: str, sim_run_dir: str,
-                  result_queue) -> None:
+                  result_queue, enable_rotor_fault: bool = False,
+                  fault_specs: Optional[list] = None, fault_config_digest: str = "none") -> None:
     """Picklable entry point for one worker's child process (spawn start
     method). Flies `n_episodes` episodes starting at global episode index
     `start_index` (NOT always 0 -- a worker respawned after a restart must
     continue numbering from where the dead attempt left off, or its fresh
     ep_0000/ep_0001/... would silently overwrite the previous attempt's
     already-written parquet files under the same worker_<k>/ directory).
+
+    `fault_specs` (M6 task 9), if given, is this worker's FULL per-episode
+    schedule (length n_episodes_per_worker, indexed by the same local
+    episode index start_index+i uses) -- passed whole on every spawn/respawn
+    rather than pre-sliced, so a respawned child indexes into it exactly the
+    same way a fresh one does, with no separate slicing logic to keep in
+    sync between the two call sites in SimFarm below.
 
     Sets ROS_DOMAIN_ID before importing rclpy (must happen before the DDS
     layer initialises -- D9) and calls rclpy.init() here, inside the child,
@@ -131,15 +139,18 @@ def _worker_main(spec: InstanceSpec, mission_id: str, mission: dict, mission_dig
     try:
         runner = EpisodeRunner(spec, run_id=run_id, mission_id=mission_id, mission=mission,
                                 mission_digest=mission_digest, env_versions_json=env_versions_json,
-                                results_dir=results_dir, feature_version=FEATURE_VERSION_UNSET)
+                                results_dir=results_dir, feature_version=FEATURE_VERSION_UNSET,
+                                enable_rotor_fault=enable_rotor_fault)
 
         def heartbeat_on_step(row):
             write_heartbeat(spec.instance, sim_run_dir, last_odometry_wall_s=row["t_wall_utc"])
 
         last_termination_reason = None
         for i in range(n_episodes):
-            episode_id = f"ep_{start_index + i:04d}"
-            seed = seed_base + start_index + i
+            local_index = start_index + i
+            episode_id = f"ep_{local_index:04d}"
+            seed = seed_base + local_index
+            fault_spec = fault_specs[local_index] if fault_specs is not None else None
             # Nothing to reset from on this child's own first episode --
             # matches run_episodes.py's identical convention. This is still
             # correct after a restart: the OS-level px4/gz processes were
@@ -148,10 +159,14 @@ def _worker_main(spec: InstanceSpec, mission_id: str, mission: dict, mission_dig
             effective_tier = "none" if i == 0 else next_reset_tier(reset_tier, last_termination_reason)
             try:
                 summary = runner.run_episode(episode_id=episode_id, reset_tier=effective_tier,
-                                              seed=seed, on_step=heartbeat_on_step)
+                                              seed=seed, on_step=heartbeat_on_step,
+                                              fault_spec=fault_spec,
+                                              fault_config_digest=fault_config_digest)
             except ResetError:
                 summary = runner.run_episode(episode_id=episode_id, reset_tier="hard",
-                                              seed=seed, on_step=heartbeat_on_step)
+                                              seed=seed, on_step=heartbeat_on_step,
+                                              fault_spec=fault_spec,
+                                              fault_config_digest=fault_config_digest)
             result_queue.put(summary)
             last_termination_reason = summary["termination_reason"]
     finally:
@@ -176,7 +191,11 @@ class SimFarm:
 
     def __init__(self, worker_count: int, mission_id: str, n_episodes_per_worker: int, *,
                  instance_base: int = 0, seed_base: int = 0, reset_tier: str = "soft",
-                 speed_factor: float = 1.0, headless: bool = True, run_id: Optional[str] = None,
+                 speed_factor: float = 1.0, model: str = DEFAULT_MODEL, headless: bool = True,
+                 enable_rotor_fault: bool = False,
+                 fault_specs_by_worker: Optional[list] = None,
+                 fault_config_digest: str = "none",
+                 run_id: Optional[str] = None, resume: bool = False,
                  results_dir: str = "results", sim_run_dir: str = DEFAULT_RUN_DIR,
                  heartbeat_stall_timeout_s: float = 45.0, restart_budget_per_worker: int = 20,
                  restart_rate_abort_threshold: float = 0.5,
@@ -210,6 +229,19 @@ class SimFarm:
         self.n_episodes_per_worker = n_episodes_per_worker
         self.seed_base = seed_base
         self.reset_tier = reset_tier
+        self.enable_rotor_fault = enable_rotor_fault
+        self.fault_config_digest = fault_config_digest
+        if fault_specs_by_worker is not None:
+            if len(fault_specs_by_worker) != worker_count:
+                raise ValueError(
+                    f"fault_specs_by_worker has {len(fault_specs_by_worker)} entries, "
+                    f"expected one per worker ({worker_count})")
+            for k, specs in enumerate(fault_specs_by_worker):
+                if len(specs) != n_episodes_per_worker:
+                    raise ValueError(
+                        f"fault_specs_by_worker[{k}] has {len(specs)} entries, expected "
+                        f"n_episodes_per_worker ({n_episodes_per_worker})")
+        self.fault_specs_by_worker = fault_specs_by_worker
         self.results_dir = results_dir
         self.sim_run_dir = sim_run_dir
         self.stagger_s = stagger_s
@@ -228,7 +260,8 @@ class SimFarm:
             f"run_{datetime.datetime.now(tz=datetime.timezone.utc):%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:6]}")
 
         self.specs = [InstanceSpec.for_instance(worker_instance(k, instance_base),
-                                                 speed_factor=speed_factor, headless=headless)
+                                                 speed_factor=speed_factor, model=model,
+                                                 headless=headless)
                       for k in range(worker_count)]
         self.supervisors = [
             WorkerSupervisor(spec, run_dir=sim_run_dir,
@@ -239,6 +272,28 @@ class SimFarm:
         self.results: list[dict] = []
         self.restart_counts: dict[int, int] = {spec.instance: 0 for spec in self.specs}
         self._completed_per_worker: dict[int, int] = {spec.instance: 0 for spec in self.specs}
+        self.resume = resume
+        if resume:
+            if run_id is None:
+                raise ValueError("resume=True requires an explicit run_id -- "
+                                  "there is no previous run to resume without one")
+            # Resuming after a killed run (M6, found live): count each
+            # worker's own already-written episode summaries on disk and
+            # pick up from the next unused index, rather than restarting
+            # every worker's numbering at 0 and overwriting already-real
+            # data. Uses the MAX existing index + 1, not the file count --
+            # robust against a gap, though none is expected in practice
+            # (episode ids are assigned sequentially with no skipped index,
+            # even across a mid-run restart -- see
+            # _synthesize_lost_episode_record's own docstring). A worker
+            # with no prior files at all resumes at 0, same as a fresh run.
+            for spec in self.specs:
+                worker_dir = Path(results_dir) / self.run_id / f"worker_{spec.instance}"
+                existing = sorted(worker_dir.glob("episode_ep_*_summary.parquet"))
+                if not existing:
+                    continue
+                indices = [int(p.stem.split("_")[2]) for p in existing]
+                self._completed_per_worker[spec.instance] = max(indices) + 1
         # M4 tasks 6/7 found live: multiprocessing.Queue.put() can return
         # before the item is actually flushed through the underlying pipe --
         # if the child process then dies right after (e.g. its own
@@ -346,14 +401,29 @@ class SimFarm:
         self._progress_on_restart = on_restart
 
         for sup in self.supervisors:
-            self._spawn_worker(sup, start_index=0, n_episodes=self.n_episodes_per_worker,
+            # start_index defaults to 0 for a fresh run; resume=True seeds
+            # _completed_per_worker from what's already on disk (see
+            # __init__), so a resumed run picks up each worker's own next
+            # unused episode index instead of restarting numbering at 0 and
+            # overwriting already-real data.
+            start_index = self._completed_per_worker[sup.spec.instance]
+            remaining = self.n_episodes_per_worker - start_index
+            if remaining <= 0:
+                # This worker already completed its whole quota before the
+                # run was interrupted -- nothing left to fly. Its OS
+                # processes are still started (via __enter__, unconditional
+                # for every worker), just never given work; sup.process
+                # stays None, which the completion check below treats the
+                # same as "already finished".
+                continue
+            self._spawn_worker(sup, start_index=start_index, n_episodes=remaining,
                                 mission=self._mission, mission_digest=self._mission_digest,
                                 env_versions_json=self._env_versions_json)
 
         deadline = time.monotonic() + self.max_wall_s
         while True:
             self._drain_queue()
-            if all(not sup.process.is_alive() for sup in self.supervisors):
+            if all(sup.process is None or not sup.process.is_alive() for sup in self.supervisors):
                 self._drain_queue()  # final drain after every child has exited
                 self.manifest.finalize(self._manifest_path)
                 break
@@ -363,6 +433,8 @@ class SimFarm:
                     f"with {sum(self._completed_per_worker.values())} episodes completed")
 
             for sup in self.supervisors:
+                if sup.process is None:
+                    continue  # never spawned: already had its full quota done on resume
                 if sup.process.is_alive():
                     continue
                 completed = self._completed_per_worker[sup.spec.instance]
@@ -375,7 +447,7 @@ class SimFarm:
                                           self._env_versions_json)
 
             for sup in self.supervisors:
-                if not sup.process.is_alive():
+                if sup.process is None or not sup.process.is_alive():
                     continue
                 try:
                     if sup.ensure_healthy():
@@ -392,11 +464,15 @@ class SimFarm:
 
     def _spawn_worker(self, sup: WorkerSupervisor, *, start_index: int, n_episodes: int,
                        mission: dict, mission_digest: str, env_versions_json: str) -> None:
+        worker_index = self.supervisors.index(sup)
+        fault_specs = (self.fault_specs_by_worker[worker_index]
+                       if self.fault_specs_by_worker is not None else None)
         proc = self._ctx.Process(
             target=_worker_main,
             args=(sup.spec, self.mission_id, mission, mission_digest, env_versions_json,
                   n_episodes, start_index, self.seed_base, self.reset_tier, self.run_id,
-                  self.results_dir, self.sim_run_dir, self._result_queue),
+                  self.results_dir, self.sim_run_dir, self._result_queue,
+                  self.enable_rotor_fault, fault_specs, self.fault_config_digest),
             daemon=True,
         )
         proc.start()
@@ -421,6 +497,7 @@ class SimFarm:
 
         from aero_bridge.episode_logger import EpisodeLogger
         from experiments.episode_schema import FEATURE_VERSION_UNSET, SCHEMA_VERSION, TerminationReason, digest
+        from experiments.fault_schedule import FaultSpec
 
         episode_id = f"ep_{completed:04d}"
         now_iso = _iso(time.time())
@@ -440,6 +517,19 @@ class SimFarm:
             t_wall_start_utc=now_iso, t_wall_end_utc=now_iso, t_wall_duration_s=0.0,
             n_steps=0, waypoints_reached=0,
             position_rmse_m=float('nan'), final_position_error_m=float('nan'),
+            # Whether a fault was actually scheduled for the lost episode
+            # isn't tracked by this (parent) process either (same reasoning
+            # as reset_tier above) -- the honest placeholder is "unknown
+            # request, nothing observed", not a guess at what the dead child
+            # would have done. Not a policy input either way (CLAUDE.md
+            # §1.7): this whole record is valid=False and excluded from
+            # every real measurement.
+            fault_config_digest="none",
+            **FaultSpec.healthy(0).to_episode_fields(),
+            fault_onset_time_s_observed=float('nan'),
+            fault_confirmed_applied=False,
+            fault_confirmed_severity_final=0.0,
+            px4_failure_detector_silent=True,
         )
         EpisodeLogger(self.run_id, worker_id=instance, results_dir=self.results_dir).write_episode(record)
         # Always newly-recorded in practice (the completed-quota guard above

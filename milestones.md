@@ -1778,6 +1778,383 @@ abstract. If this test is not passing, the policy trains against one fault and
 is evaluated against a different one, and **every RQ5 number is meaningless** —
 in a way that looks exactly like an interesting transfer gap.
 
+**Design, planned in plan mode 2026-09-22, before any code was written**
+(CLAUDE.md's rule 5 for this milestone). Full rationale, source citations and
+judgment calls are in the plan review; summarized here as the build record.
+
+**Architecture: a relay, not a physics reimplementation.** Gazebo's stock
+`MulticopterMotorModel` plugin (fixed `motorConstant` at model load) stays in
+the new `x500_aero` model exactly as in stock `x500` — all real thrust
+physics remains Gazebo-validated. A new `RotorDegradationSystem` C++ plugin
+sits between PX4's bridge (which publishes commanded rotor velocities as
+`gz::msgs::Actuators` on `/<model_name>/command/motor_speed` —
+confirmed from `GZMixingInterfaceESC.cpp`, PX4 v1.17.0, unmodified) and the
+stock motor plugins (repointed to a relayed topic): every rotor's velocity
+passes through unchanged except the currently-faulted one, scaled by
+`sqrt(1 - severity)` — since thrust ∝ velocity², this scales thrust (and,
+via `momentConstant`, reaction torque) by exactly `efficiency = 1 -
+severity`. Control/status channel: `gz.msgs.Param` (a generic variant map,
+`{rotor_index, severity[, applied]}`), not a new custom `.proto` — its C++
+headers ship with the already-transitively-required `libgz-msgs10-dev`, and
+its Python bindings are already used twice in this repo
+(`simulation/sim_clock.py`, `aero_bridge/reset.py`) for exactly this kind of
+ad-hoc runtime channel, so `simulation/rotor_fault.py` (task 5) is a third
+instance of an established pattern, not a new one.
+
+**Zero PX4 tree changes needed — but not for the reason first assumed here.**
+This section originally claimed `px4-rc.gzsim` spawns `model://$MODEL_NAME`
+generically by stripping a `gz_` prefix off `PX4_SIM_MODEL`. **That is
+wrong, caught live the first time `--model x500_aero` was actually tried**
+(task 4): `px4-rc.gzsim` hardcodes
+`"${PX4_GZ_MODELS}/${MODEL_NAME}/model.sdf"` — a path under PX4's *own*
+models directory, never resolved via `GZ_SIM_RESOURCE_PATH` the way a
+nested SDF `<include>` is — and `PX4_GZ_MODELS` can't be overridden either,
+since PX4's own `gz_env.sh` unconditionally re-exports it every time
+`px4-rc.gzsim` sources it. The actual fix (task 4): the launcher
+(`scripts/sim_start.sh`) spawns a project-local model itself, by absolute
+path, via a `gz.msgs.EntityFactory` request
+(`InstanceSpec.gz_spawn_request()`), then sets `PX4_GZ_MODEL_NAME` so
+`px4-rc.gzsim` attaches to the already-spawned model instead of trying to
+spawn one itself. `4001_gz_x500`'s `PX4_SIM_MODEL=${PX4_SIM_MODEL:=x500}`
+default-only-assignment claim, and the "zero PX4 tree changes" conclusion
+itself, both still hold — only the *mechanism* was wrong. Left here
+uncorrected-in-place, with this note, rather than silently rewritten, so
+the mistake and its catch are on the record the same way M5's naming
+correction is. `scripts/sim_start.sh` **already** named this milestone in a
+comment and already conditionally wired `simulation/models` onto
+`GZ_SIM_RESOURCE_PATH` and `simulation/gz_plugins/build` onto
+`GZ_SIM_SYSTEM_PLUGIN_PATH` (from M1b) — this milestone created those two
+directories, nothing upstream of them.
+
+**PX4 FailureDetector-silence check needs zero new subscriptions.**
+`VehicleStatus.msg` (already subscribed via `px4_interface.py`, already
+flowing into `mission_executor.record_step()`) already carries
+`failure_detector_status` (`FAILURE_MOTOR = 128`, `FAILURE_IMBALANCED_PROP =
+64`, etc.) — logging an already-flowing field, not a new topic.
+
+**Scope note.** `planning.md` §6's fault-schema table (more detailed and
+authoritative than this file's one-line mention of "intermittent") scopes v1
+to exactly one fault type — single-rotor partial thrust degradation, step or
+ramp onset, persisting to episode end. Intermittent profile is in
+`planning.md`'s own *deferred* backlog; v1 here implements **step and ramp
+only**.
+
+**Ground-truth fault labels are logging-only, CLAUDE.md §1.7/anti-pattern
+12.** A dedicated test (`test_no_fault_field_appears_in_observation_v1_or_
+shared_features`) asserts none of the new fault fields appear in
+`configs/rl/observation_v1.yaml` or as `side: shared` in
+`configs/features.yaml` — written before anything else touches the schema.
+
+**Dataset generation operating point: 2 workers, 1x speed** — not the
+2-worker/4x figure `docs/throughput.md`'s original 16-configuration sweep
+recommended. M4's own later soak test found 4x mostly didn't complete
+missions at soak scale and reverted the recommendation to 1x; the 500-1000
+episode dataset run is soak-scale, so it uses the soak-validated point.
+
+### Tasks
+
+1. ✅ **Fault schema config + pure sampler** (no simulator).
+   `configs/faults/rotor_thrust_degradation_v1.yaml` (`fault_schema_version`,
+   rotor/severity/onset/profile ranges, `healthy_fraction`),
+   `experiments/fault_schedule.py` (`FaultSpec` dataclass,
+   `load_fault_config`/`validate_fault_config`, pure
+   `sample_fault_schedule(cfg, rng, n_episodes)` — seeded `Generator` passed
+   explicitly, never `np.random` global state per anti-pattern 16). 21 tests
+   in `tests/test_fault_schedule.py`, all passing. One real bug found and
+   fixed immediately by the determinism test: `FaultSpec.onset_time_s` was
+   originally `float('nan')` for the healthy sentinel, but a frozen
+   dataclass with a NaN field is never equal to itself under `==` (`nan !=
+   nan`), which silently broke `test_sampler_is_deterministic_given_seed`
+   for any schedule containing a healthy episode. Fixed by making
+   `onset_time_s: Optional[float]` (`None` sentinel instead of NaN) — schema
+   v4 (task 2) maps `None` -> NaN only at the point a spec is written into a
+   parquet column, where NaN is this project's established missing-float
+   convention.
+2. ✅ **Episode schema v3 → v4** (ground-truth fault labels). New closed
+   enums (`fault_types`, `fault_profiles`) and episode-level fields
+   (`fault_config_digest`, `fault_applied`, `fault_type`,
+   `fault_rotor_index`, `fault_severity_commanded`,
+   `fault_onset_time_s_requested/observed`, `fault_profile`,
+   `fault_ramp_duration_s`, `fault_confirmed_applied`,
+   `fault_confirmed_severity_final`, `px4_failure_detector_silent`), plus one
+   step-level field (`px4_failure_detector_status`, straight passthrough of
+   the already-subscribed `VehicleStatus.failure_detector_status` bitmask —
+   zero new topics). `experiments/episode_schema.py`: `SCHEMA_VERSION =
+   "4"`; `FaultType`/`FaultProfile` are **imported from
+   `experiments.fault_schedule`**, not redefined (CLAUDE.md §1.4 — task 1
+   already owns them). `mission_executor.py`'s `record_step()` gains the
+   passthrough field. Every existing writer (`EpisodeRunner`,
+   `SimFarm._synthesize_lost_episode_record`) updated to populate the new
+   fields with `FaultSpec.healthy(0).to_episode_fields()` sentinels — no
+   fault-injection caller exists yet (that's task 6), so every episode flown
+   today is, factually, healthy; `px4_failure_detector_silent` is computed
+   for real from each episode's own logged steps, not stubbed. The guard
+   test required by CLAUDE.md §1.7 (`tests/test_fault_fields_not_in_
+   observation.py`) was written in this same task, before any other schema
+   file touched: 3 tests, including one that pins its own hand-listed field
+   set equal to the schema's actual fault fields so it cannot silently go
+   stale. 220/220 non-sim tests passing (was 190 at the end of M5; +30 across
+   tasks 1-2).
+3. ✅ **`RotorDegradationSystem` — the relay plugin.**
+   `simulation/gz_plugins/CMakeLists.txt` +
+   `simulation/gz_plugins/src/RotorDegradationSystem.{hh,cc}`. Built clean
+   with `-Wall -Wextra`, zero warnings. Wrote the full
+   `sqrt(1-severity)` relay math in one pass rather than a binary-only
+   version first (task 7's own scope) — writing a deliberately-limited
+   version now and rewriting it in task 7 would itself have been the kind
+   of throwaway intermediate implementation CLAUDE.md warns against; task 7
+   is still where graded severity gets its own dedicated sweep test.
+   `gz.msgs.Param` control/status channel as planned, confirmed live via
+   `gz topic -e` (heartbeat with correct no-fault sentinels arrives on
+   worker startup). **Real finding, Python side only:** the apt-installed
+   `python3-gz-msgs10` bindings do **not** expose `Param.params` as a
+   Python dict-like map field, despite it being a real `map<string, Any>`
+   on the wire (the C++ plugin side, and `gz topic -e`, both read/write it
+   correctly) — indexing it with a string key raises `TypeError`; Python
+   code must iterate it as a plain repeated field of `(key, value)` entries
+   instead (`{e.key: e.value for e in msg.params}`). Confirmed directly by
+   reproducing it standalone, not assumed from the traceback. Documented in
+   the test and binding for task 5 (`simulation/rotor_fault.py`) to reuse.
+4. ✅ **`x500_aero` model.** `simulation/models/x500_aero/{model.config,
+   model.sdf}` — includes `model://x500_base` (PX4's own, untouched), same 4
+   `MulticopterMotorModel` blocks as stock `x500` with `commandSubTopic`
+   repointed, plus the new plugin block. **A real, load-bearing correction
+   to this milestone's own design note above**, found live the first time
+   `--model x500_aero` was actually tried: `px4-rc.gzsim` does **not**
+   spawn a model via a generic `model://$MODEL_NAME` resolution (that was
+   the plan's original, wrong reading of the source) — it hardcodes
+   `"${PX4_GZ_MODELS}/${MODEL_NAME}/model.sdf"`, and `PX4_GZ_MODELS` always
+   points at PX4's own models directory (its `gz_env.sh` unconditionally
+   re-exports it, clobbering any override set beforehand). Fixed with no
+   PX4 tree changes, confirmed live: `scripts/sim_start.sh` now spawns a
+   project-local model itself, by absolute path, via a
+   `gz.msgs.EntityFactory` `sdf_filename` request
+   (`InstanceSpec.gz_spawn_request()`, new), and sets `PX4_GZ_MODEL_NAME` so
+   `px4-rc.gzsim` attaches to it instead of trying to spawn its own —
+   replicating the `set_physics` speed-factor call that branch would
+   otherwise have skipped. Separately, rcS's airframe-by-filename lookup
+   also fails for a project-local model name ("Unknown model ... not found
+   by name"); fixed the same way, with `PX4_SYS_AUTOSTART=4001` reusing
+   x500's own existing airframe. Both fixes live in one place
+   (`simulation/instance_spec.py`'s `_AUTOSTART_OVERRIDE_FOR_MODEL`). A
+   **second** real bug found live during verification: `run_episodes.py`
+   and `SimFarm` didn't accept a `--model`/`model` parameter at all, so
+   every caller silently built its `InstanceSpec` with the *default* model
+   ("x500") regardless of which model the worker was actually started
+   with — harmless for arm/fly (those don't depend on model name), but
+   `aero_bridge/reset.py`'s `gz set_pose` soft reset addresses the entity
+   by `spec.model_name` and failed outright ("gz set_pose to spawn failed
+   for x500_0" — the wrong, default-derived name) on a real
+   `x500_aero`-worker soft reset. Fixed by threading `model` through both
+   (`run_episodes.py --model`, `SimFarm(model=...)`); `WorkerSupervisor` /
+   `worker_process.py` already passed `spec.model` to `sim_start.sh -m`
+   correctly, so no change was needed there. Verified live: a full healthy
+   `square_circuit` flight on `x500_aero`, including a genuine soft reset,
+   is indistinguishable from a plain `x500` run (RMSE ~5.6-6.3m, matching
+   M3's documented ~6.44m noise floor).
+5. ✅ **`simulation/rotor_fault.py`** — the Python control module
+   (`RotorFaultController`: `set_rotor_fault`, `clear_rotor_fault`,
+   `wait_for_heartbeat`, latest-status tracking), following
+   `sim_clock.py`'s native-binding pattern. Uses the entry-iteration
+   workaround from task 3's finding for both reading (status echo) and
+   writing (fault command) `gz.msgs.Param`. Verified live against a real
+   `x500_aero` worker: `wait_for_heartbeat` succeeds, `set_rotor_fault(2,
+   0.5)` is confirmed via the echo (`latest_rotor_index/severity/applied`),
+   `clear_rotor_fault()` confirmed clearing it back to the idle sentinel.
+   Negative case verified too: pointed at a plain `x500` worker (no
+   plugin), `wait_for_heartbeat` raises `RotorFaultControllerError` within
+   its own timeout rather than hanging.
+6. ✅ **`EpisodeRunner` integration.** `enable_rotor_fault: bool = False`
+   constructor flag (default off, every M3/M4/M5 caller unaffected, verified
+   — all pre-existing tests still pass unmodified);
+   `run_episode(..., fault_spec=None, fault_config_digest="none")` drives
+   onset/ramp timing against real sim-time ticks and populates the schema-v4
+   fields from the status echo, never from the command alone. An
+   unconditional `clear_rotor_fault()` runs before every fault-enabled
+   episode's flight (soft/medium reset keeps the same gz sim process, and
+   with it the same plugin instance, alive — a fault from the *previous*
+   episode would otherwise still be active). 6 new unit tests against a fake
+   controller (step commands once at onset; ramp rises linearly then locks;
+   a healthy `FaultSpec` and `fault_spec=None` both write identical healthy
+   sentinels; `fault_spec` without `enable_rotor_fault=True` raises).
+   **Verified live** (`tests/sim/test_episode_runner_fault_injection.py`,
+   2 tests): a real step fault is commanded and genuinely confirmed via the
+   plugin's own echo during a real flight, and — the one place this design
+   wasn't reusing an already-proven pattern wholesale —
+   `RotorFaultController` survives a hard reset and correctly reconnects to
+   the new gz sim process's plugin instance for a second faulted episode.
+7. ✅ **Graded severity in the plugin** (build order steps 2-3). The full
+   `sqrt(1-severity)` relay math was already written in task 3 (see that
+   task's note on why); this task is its dedicated verification.
+   `test_graded_severity_scales_relayed_velocity`
+   (`tests/sim/test_rotor_fault_controller.py`) commands a known, marker
+   velocity directly onto the real command topic (PX4 not needed — bypasses
+   arming entirely, isolating the relay's arithmetic from flight physics per
+   the milestone plan, the same technique task 8 uses) and confirms, for
+   `s ∈ {0.0, 0.2, 0.5, 0.9}`, that the relayed velocity ratio equals
+   `sqrt(1-s)` to `1e-6` — exact, not approximate, since this is pure
+   arithmetic — and that the other three rotors are untouched. One test bug
+   found and fixed live: waiting on `latest_severity` changing was a no-op
+   for the `s=0.0` case, since that is also the attribute's un-echoed
+   default; fixed by waiting on `latest_rotor_index` instead, reset to `-1`
+   before each iteration.
+8. ✅ **Cross-validation thrust fixture** (CLAUDE.md §1.6). **Deviated from
+   the plan's force-torque-sensor design**, which the plan itself flagged
+   as its one unverified piece: a real single-rotor fault is not a
+   symmetric net-thrust loss (it's mostly attitude torque, which a real PX4
+   controller would immediately start compensating for — exactly the
+   confound this measurement needs to avoid), and getting the
+   `gz-sim-forcetorque-system` SDF syntax right blind, with no example to
+   reference, risked significant time for uncertain payoff. Used the
+   already-verified, exact measurement instead:
+   `scripts/measure_rotor_fault_thrust.py` commands a known velocity
+   directly onto the real command topic (PX4 not in the loop at all) and
+   reads the relayed velocity ratio — task 7's own live-measured result —
+   then derives `thrust_ratio = velocity_ratio²` from
+   `MulticopterMotorModel`'s documented (not reimplemented)
+   `thrust = motorConstant·ω²` law. Written honestly as a **derivation**,
+   not an independent physical sensor reading, with the limitation and the
+   fallback (an independent force-torque or joint-telemetry measurement)
+   spelled out in the script's own module docstring for M8b to revisit if
+   its own cross-validation ever disagrees. `tests/fixtures/
+   rotor_fault_thrust_curve.json` written from a real live run: exact match
+   to `1-s` for `s ∈ {0.0, 0.2, 0.5, 0.9}` (max deviation ~2e-16, float
+   rounding only). `tests/sim/test_rotor_fault_thrust_fixture.py`
+   independently reproduces the same measurement live (loaded by file path
+   via `importlib`, not `import scripts...` — `/opt/ros/humble`'s own
+   dist-packages ships a real, `__init__.py`-bearing package also named
+   `scripts` that Python's import system prefers over this project's
+   `scripts/` directory regardless of `sys.path` order, confirmed live —
+   sidesteps the collision rather than turning `scripts/` into a package
+   project-wide to work around one test).
+9. ✅ **Dataset generator.** `experiments/generate_fault_dataset.py`: samples
+   a flat schedule once with a seeded `Generator`
+   (`sample_fault_schedule`, task 1), partitions it into contiguous
+   per-worker blocks (`build_fault_specs_by_worker`, pure, unit tested —
+   resume-safe by construction: a respawned worker's `_worker_main`
+   indexes its own already-assigned block by local episode index, the same
+   mechanism episode ids already use), and threads it through `SimFarm`
+   (`enable_rotor_fault`/`fault_specs_by_worker`/`fault_config_digest`
+   constructor params — small, explicit additions to the existing worker
+   loop, not a second implementation) to each worker's fault-aware
+   `EpisodeRunner` (task 6). **Verified live**
+   (`tests/sim/test_fault_dataset_small_run.py`): a real 2-worker × 3-episode
+   mixed run produced 6/6 schema-v4-valid records through the actual
+   `generate()` entry point, with real, honest variation — 5/6 faults
+   confirmed applied (the 6th: `completed` before its (comparatively late)
+   sampled onset time was ever reached, a real edge case worth `docs/
+   fault_dataset.md` noting at scale, not a bug), and one episode where
+   PX4's own `FailureDetector` was **not** silent — exactly the kind of
+   real finding task 10's full run needs to characterize per severity, not
+   something to paper over even in this small a sample.
+10. 🔄 **Real dataset generation run — in progress.** 2 workers, 1x speed,
+    `x500_aero`, 750 episodes (`run_id=m6_dataset_v1`). `experiments/
+    analysis/fault_dataset_report.py` (new) reads the run back and prints
+    confirmation rate / FailureDetector-silence rate overall, per severity
+    bucket, per profile, and per rotor -- `docs/fault_dataset.md` gets
+    written from its real output once the run finishes.
+
+    **Real interruption and resume, live, not hypothetical.** The machine's
+    disk filled to ~500MB free mid-run (unrelated to this run's own small
+    footprint). Stopped cleanly: `SIGINT` to the generator process (its
+    `with SimFarm(...) as farm:` unwinds properly on `KeyboardInterrupt`),
+    then `scripts/sim_stop.sh --all --sweep` to clear a handful of
+    processes orphaned by the interrupt landing mid-worker-restart — zero
+    orphans confirmed via `ps aux` before the machine was restarted to
+    resize the partition. 131-133 episodes' worth of real data (a handful
+    of per-worker parquet files were still landing as the interrupt hit)
+    was intact and valid on disk throughout, never at risk.
+
+    **Built real resume support** rather than re-flying already-completed
+    episodes (found needed live, not speculative): `SimFarm(resume=True)`
+    scans each worker's own `results/<run_id>/worker_<k>/` for existing
+    `episode_ep_*_summary.parquet` files and seeds `_completed_per_worker`
+    from the highest existing index + 1, so the initial spawn (not just a
+    mid-run `WorkerSupervisor` restart, which already resumed correctly)
+    picks up each worker's own next unused episode index instead of
+    restarting numbering at 0 and overwriting real data. The fault schedule
+    itself is never persisted or reloaded — `sample_fault_schedule`/
+    `build_fault_specs_by_worker` are pure functions of
+    (config, seed, n_episodes, worker_count), so re-deriving it with the
+    identical arguments reproduces the identical per-worker schedule
+    deterministically; resuming only changes which INDICES actually get
+    flown. One real edge case fixed along the way: a worker already at its
+    full quota on resume is never spawned (`sup.process` stays `None`),
+    which `run()`'s completion/health-check loops did not originally guard
+    against (`sup.process.is_alive()` on `None` would crash) — fixed and
+    covered by `test_run_skips_spawning_a_worker_already_at_full_quota`.
+    4 new tests in `tests/test_sim_farm_assignment.py`, all passing.
+    Verified live: `--resume` picked up at `worker 0 ep_0064` (immediately
+    after the last episode on disk, `ep_0063`), not `ep_0000`.
+11. ⬜ **PX4 tree cleanliness + wrap-up.** `git -C ~/projects/PX4-Autopilot
+    status --porcelain` empty; `milestones.md` progress log/checkboxes
+    updated.
+
+### Files created
+
+```
+configs/faults/rotor_thrust_degradation_v1.yaml
+experiments/fault_schedule.py
+experiments/generate_fault_dataset.py
+simulation/gz_plugins/CMakeLists.txt
+simulation/gz_plugins/src/RotorDegradationSystem.hh
+simulation/gz_plugins/src/RotorDegradationSystem.cc
+simulation/models/x500_aero/model.config
+simulation/models/x500_aero/model.sdf
+simulation/rotor_fault.py
+scripts/measure_rotor_fault_thrust.py
+tests/fixtures/rotor_fault_thrust_curve.json
+docs/fault_dataset.md
+configs/schema/episode_record.yaml             (v3 -> v4)
+experiments/episode_schema.py                  (SCHEMA_VERSION bump)
+experiments/episode_runner.py                  (fault_spec integration)
+experiments/sim_farm.py                        (fault_specs threading)
+ros2_ws/src/aero_bridge/aero_bridge/mission_executor.py   (record_step)
+```
+
+### Tests (required)
+
+```
+tests/test_fault_schedule.py
+tests/test_generate_fault_dataset_assignment.py
+tests/test_episode_schema.py                   (extended — v4)
+tests/test_mission_executor.py                 (extended)
+tests/test_episode_runner.py                   (extended — fault_spec)
+tests/test_fault_fields_not_in_observation.py
+tests/sim/test_rotor_fault_plugin_loads.py
+tests/sim/test_x500_aero_model_loads.py
+tests/sim/test_rotor_fault_controller.py
+tests/sim/test_episode_runner_fault_injection.py
+tests/sim/test_rotor_fault_thrust_fixture.py
+tests/sim/test_fault_dataset_small_run.py
+tests/slow/test_fault_dataset_run.py
+```
+
+### Verify with
+
+```bash
+pytest tests/ -m "not sim and not slow" -q
+cmake -S simulation/gz_plugins -B simulation/gz_plugins/build && cmake --build simulation/gz_plugins/build
+pytest tests/sim -k rotor_fault -q
+pytest tests/slow/test_fault_dataset_run.py -q
+git -C ~/projects/PX4-Autopilot status --porcelain    # must be empty
+scripts/sim_stop.sh --all
+```
+
+### Watch out for
+
+- The C++ plugin is genuinely concurrent (gz-transport delivers subscription
+  callbacks on its own threads; relay logic runs alongside the physics
+  thread) in a way nothing else in this repo's C++ surface is — real
+  scrutiny at implementation time, not just a design read-through.
+- Don't let the real dataset run (task 10) be the first time hard-reset ->
+  `RotorFaultController` rebuild gets exercised — task 6's sim test must
+  cover it first, the same lesson M4's soak test already taught this project.
+- It is tempting to add a fault field as a "convenience" shared feature —
+  don't; that is exactly the violation CLAUDE.md warns Isaac makes trivially
+  easy, and the ROS side is just as easy to get wrong once the field is
+  sitting right next to the real features in the same row.
+
 ---
 
 # M7 — AI fault detector

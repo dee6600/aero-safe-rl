@@ -1,0 +1,50 @@
+# v1 fault model (M6, planning.md §6, CLAUDE.md §1.4/§1.6/D2): single-rotor
+# partial thrust degradation. Rotor i in {0..3}, severity s = fraction of
+# thrust lost, step or ramp onset at a randomised mission time, persisting to
+# episode end. This is the ONE fault type v1 implements -- see
+# experiments/fault_schedule.py for the sampler that reads this file and
+# milestones.md M6 for why "intermittent" (mentioned only in passing
+# elsewhere) is out of scope here.
+#
+# Loaded and validated by experiments/fault_schedule.py -- that module, not
+# this file alone, is what a caller actually uses. fault_schema_version is
+# mirrored by a Python constant there; changing this file's shape means
+# bumping that version, not editing a reader to cope with two shapes
+# (CLAUDE.md §7).
+
+fault_schema_version: "1"
+fault_type: rotor_thrust_degradation
+mission_id: square_circuit
+
+dataset:
+  # Total episodes a full generate_fault_dataset.py run produces from this
+  # config (M6 task 10's real run overrides this via --n-episodes; this is
+  # the value a small/dev run or a test fixture gets by default).
+  n_episodes: 750
+  seed: 20260922
+  # Fraction of episodes with no fault at all (fault_applied=False,
+  # fault_type=none) -- the detector's negative examples. Sampled from the
+  # same run as the faulty episodes so both share one mission/model/farm
+  # configuration rather than risking two runs drifting apart.
+  healthy_fraction: 0.2
+
+rotor_indices: [0, 1, 2, 3]
+
+# Fraction of thrust lost, planning.md §6's own range.
+severity_range_s: [0.2, 0.9]
+
+# Onset time, seconds, relative to the mission's own t_sim_start_s (arm +
+# offboard engage complete, waypoint sequence begins) -- NOT relative to
+# episode start, since arm/takeoff duration is not itself part of the
+# research question. experiments/fault_schedule.py validates that
+# onset + (ramp_duration_s if profile == ramp else 0) leaves at least one
+# full hold_time_s + final_hover_s of the mission's own timeout_s remaining,
+# so a sampled fault can never be scheduled to "onset" after the mission has
+# effectively already ended.
+onset_time_range_s: [5.0, 40.0]
+
+profiles: [step, ramp]
+# Only consulted when profile == ramp: severity rises linearly from 0 to the
+# sampled target over this many seconds, then holds at the target for the
+# rest of the episode.
+ramp_duration_range_s: [1.0, 5.0]

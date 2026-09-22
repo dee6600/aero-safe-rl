@@ -15,8 +15,34 @@
 # FeatureExtractor (ai/features/feature_extractor.py) reads them to build a
 # feature vector on demand; no derived feature is written into the schema
 # itself, so a feature_version bump never forces a schema bump.
+#
+# v4 (M6 task 2) added ground-truth rotor-fault labels: episode-level fields
+# describing what fault (if any) was commanded, when, and whether it was
+# confirmed actually applied and PX4's own FailureDetector stayed silent,
+# plus one step-level passthrough of PX4's failure_detector_status bitmask.
+# These are LABELS for the detector to train against (CLAUDE.md §1.7 /
+# anti-pattern 12) -- tests/test_fault_fields_not_in_observation.py asserts
+# none of them ever appears in configs/rl/observation_v1.yaml or as a
+# side: shared entry in configs/features.yaml. fault_type/fault_profile
+# mirror experiments/fault_schedule.py's FaultType/FaultProfile enums
+# exactly (one definition, imported by episode_schema.py -- not redefined).
 
-schema_version: "3"
+schema_version: "4"
+
+# Closed enum for the fault (if any) commanded during an episode. "none" is
+# the healthy case. v1 implements exactly one non-none fault type
+# (planning.md §6) -- mirrors experiments.fault_schedule.FaultType.
+fault_types:
+  - none
+  - rotor_thrust_degradation
+
+# Closed enum for the fault's onset profile. "none" is the healthy case.
+# "intermittent" is deferred past v1 (planning.md §6's backlog table) --
+# mirrors experiments.fault_schedule.FaultProfile.
+fault_profiles:
+  - none
+  - step
+  - ramp
 
 # Closed enum. A record's termination_reason must be exactly one of these.
 # Extend deliberately when a milestone adds a real new outcome -- never write
@@ -74,6 +100,18 @@ episode_fields:
     - waypoints_reached
     - position_rmse_m
     - final_position_error_m
+    - fault_config_digest
+    - fault_applied
+    - fault_type
+    - fault_rotor_index
+    - fault_severity_commanded
+    - fault_onset_time_s_requested
+    - fault_onset_time_s_observed
+    - fault_profile
+    - fault_ramp_duration_s
+    - fault_confirmed_applied
+    - fault_confirmed_severity_final
+    - px4_failure_detector_silent
 
 # One row per control-loop tick during the flight (CONTROL_RATE_HZ in
 # mission_executor.py), written by the same episode's logger before the
@@ -113,3 +151,4 @@ step_fields:
     - motor_1_output
     - motor_2_output
     - motor_3_output
+    - px4_failure_detector_status

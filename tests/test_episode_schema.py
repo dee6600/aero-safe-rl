@@ -8,6 +8,8 @@ import pytest
 
 from experiments.episode_schema import (
     FEATURE_VERSION_UNSET,
+    FaultProfile,
+    FaultType,
     ResetTier,
     SCHEMA_VERSION,
     SchemaValidationError,
@@ -43,6 +45,18 @@ VALID_EPISODE = dict(
     waypoints_reached=5,
     position_rmse_m=0.31,
     final_position_error_m=0.05,
+    fault_config_digest="none",
+    fault_applied=False,
+    fault_type=FaultType.NONE.value,
+    fault_rotor_index=-1,
+    fault_severity_commanded=0.0,
+    fault_onset_time_s_requested=float('nan'),
+    fault_onset_time_s_observed=float('nan'),
+    fault_profile=FaultProfile.NONE.value,
+    fault_ramp_duration_s=0.0,
+    fault_confirmed_applied=False,
+    fault_confirmed_severity_final=0.0,
+    px4_failure_detector_silent=True,
 )
 
 VALID_STEP = dict(
@@ -64,6 +78,7 @@ VALID_STEP = dict(
     rate_p_rad_s=0.0, rate_q_rad_s=0.0, rate_r_rad_s=0.0,
     accel_x_m_s2=0.0, accel_y_m_s2=0.0, accel_z_m_s2=-9.81,
     motor_0_output=0.5, motor_1_output=0.5, motor_2_output=0.5, motor_3_output=0.5,
+    px4_failure_detector_status=0,
 )
 
 
@@ -96,6 +111,37 @@ def test_unknown_reset_tier_fails():
         validate_episode(bad)
 
 
+def test_unknown_fault_type_fails():
+    bad = dict(VALID_EPISODE, fault_type="gps_dropout")
+    with pytest.raises(SchemaValidationError, match="fault_type"):
+        validate_episode(bad)
+
+
+def test_unknown_fault_profile_fails():
+    bad = dict(VALID_EPISODE, fault_profile="intermittent")
+    with pytest.raises(SchemaValidationError, match="fault_profile"):
+        validate_episode(bad)
+
+
+def test_faulty_episode_record_validates():
+    faulty = dict(
+        VALID_EPISODE,
+        fault_config_digest="abc123",
+        fault_applied=True,
+        fault_type=FaultType.ROTOR_THRUST_DEGRADATION.value,
+        fault_rotor_index=2,
+        fault_severity_commanded=0.5,
+        fault_onset_time_s_requested=12.0,
+        fault_onset_time_s_observed=12.1,
+        fault_profile=FaultProfile.STEP.value,
+        fault_ramp_duration_s=0.0,
+        fault_confirmed_applied=True,
+        fault_confirmed_severity_final=0.5,
+        px4_failure_detector_silent=True,
+    )
+    validate_episode(faulty)
+
+
 def test_schema_version_recorded():
     bad = dict(VALID_EPISODE, schema_version="99")
     with pytest.raises(SchemaValidationError, match="schema_version"):
@@ -113,6 +159,15 @@ def test_termination_reason_enum_closed():
     schema = load_schema()
     assert set(schema["termination_reasons"]) == {r.value for r in TerminationReason}
     assert set(schema["reset_tiers"]) == {t.value for t in ResetTier}
+
+
+def test_fault_type_and_profile_enums_closed():
+    """FaultType/FaultProfile are owned by experiments.fault_schedule (M6
+    task 1) and merely re-exported here -- this is the drift-detection test
+    for that pairing, the same pattern as test_termination_reason_enum_closed."""
+    schema = load_schema()
+    assert set(schema["fault_types"]) == {t.value for t in FaultType}
+    assert set(schema["fault_profiles"]) == {p.value for p in FaultProfile}
 
 
 def test_digest_is_stable_and_order_independent():

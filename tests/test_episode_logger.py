@@ -8,7 +8,8 @@ import pytest
 
 from aero_bridge.episode_logger import EpisodeLogger
 from experiments.episode_schema import (
-    FEATURE_VERSION_UNSET, ResetTier, SCHEMA_VERSION, SchemaValidationError, TerminationReason,
+    FEATURE_VERSION_UNSET, FaultProfile, FaultType, ResetTier, SCHEMA_VERSION,
+    SchemaValidationError, TerminationReason,
 )
 
 STEP_TEMPLATE = dict(
@@ -20,6 +21,7 @@ STEP_TEMPLATE = dict(
     rate_p_rad_s=0.0, rate_q_rad_s=0.0, rate_r_rad_s=0.0,
     accel_x_m_s2=0.0, accel_y_m_s2=0.0, accel_z_m_s2=-9.81,
     motor_0_output=0.5, motor_1_output=0.5, motor_2_output=0.5, motor_3_output=0.5,
+    px4_failure_detector_status=0,
 )
 
 EPISODE_TEMPLATE = dict(
@@ -30,6 +32,12 @@ EPISODE_TEMPLATE = dict(
     valid=True, t_sim_start_s=0.0, t_sim_end_s=10.0, t_sim_duration_s=10.0,
     t_wall_start_utc="x", t_wall_end_utc="y", t_wall_duration_s=1.0,
     n_steps=3, waypoints_reached=5, position_rmse_m=0.1, final_position_error_m=0.05,
+    fault_config_digest="none", fault_applied=False, fault_type=FaultType.NONE.value,
+    fault_rotor_index=-1, fault_severity_commanded=0.0,
+    fault_onset_time_s_requested=float('nan'), fault_onset_time_s_observed=float('nan'),
+    fault_profile=FaultProfile.NONE.value, fault_ramp_duration_s=0.0,
+    fault_confirmed_applied=False, fault_confirmed_severity_final=0.0,
+    px4_failure_detector_silent=True,
 )
 
 

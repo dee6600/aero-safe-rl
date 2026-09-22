@@ -33,16 +33,24 @@ from experiments.episode_schema import FEATURE_VERSION_UNSET, digest
 
 
 def run_episodes(mission_id: str, n: int, instance: int, *, reset_tier: str = "soft",
-                  seed: int = 0, speed_factor: float = 1.0, run_id: str | None = None,
+                  seed: int = 0, speed_factor: float = 1.0, model: str | None = None,
+                  run_id: str | None = None,
                   results_dir: str | Path = "results") -> list[dict]:
     import os
 
-    from simulation.instance_spec import InstanceSpec
+    from simulation.instance_spec import DEFAULT_MODEL, InstanceSpec
 
     run_id = run_id or f"run_{datetime.datetime.now(tz=datetime.timezone.utc):%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:6]}"
     mission_path = REPO / "configs" / "missions" / f"{mission_id}.yaml"
 
-    spec = InstanceSpec.for_instance(instance, speed_factor=speed_factor)
+    # Must match whatever model the worker was actually started with
+    # (scripts/sim_start.sh -m) -- this script connects to an already-running
+    # worker rather than starting one, but spec.model_name (used by
+    # aero_bridge/reset.py's gz-transport calls, e.g. set_pose) is still
+    # derived from it, and a mismatch here fails silently in exactly that
+    # kind of call, not at startup (M6, found live).
+    spec = InstanceSpec.for_instance(instance, speed_factor=speed_factor,
+                                      model=model or DEFAULT_MODEL)
 
     # ROS_DOMAIN_ID must match the instance BEFORE rclpy (and the DDS layer
     # underneath it) initialises -- it cannot be changed afterwards. Every
@@ -141,13 +149,15 @@ def main(argv=None) -> None:
     ap.add_argument("--reset-tier", choices=["soft", "medium", "hard"], default="soft")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--speed", type=float, default=1.0)
+    ap.add_argument("--model", default=None,
+                    help="must match the model the worker was started with (sim_start.sh -m)")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--results-dir", default=str(REPO / "results"))
     args = ap.parse_args(argv)
 
     run_episodes(args.mission, args.n, args.instance, reset_tier=args.reset_tier,
-                 seed=args.seed, speed_factor=args.speed, run_id=args.run_id,
-                 results_dir=args.results_dir)
+                 seed=args.seed, speed_factor=args.speed, model=args.model,
+                 run_id=args.run_id, results_dir=args.results_dir)
 
 
 if __name__ == "__main__":

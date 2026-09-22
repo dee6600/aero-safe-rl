@@ -225,6 +225,40 @@ echo "  xrce agent  pid $PID_AGENT  (udp $SPEC_XRCE_PORT)"
 # shellcheck disable=SC1090
 eval "$(cd "$REPO_DIR" && python -m simulation.instance_spec "${SPEC_ARGS[@]}" --env)"
 
+# Project-local models (M6's x500_aero, etc.) need the launcher to spawn
+# them itself, by absolute path, before px4 starts. px4-rc.gzsim's own spawn
+# logic (~/projects/PX4-Autopilot, unmodified) hardcodes a path under PX4's
+# OWN models directory and can never find one of ours -- confirmed live, not
+# assumed; see simulation/instance_spec.py's _AUTOSTART_OVERRIDE_FOR_MODEL
+# and gz_spawn_request() docstrings for the full story. PX4_GZ_MODEL_NAME,
+# set by the --env eval above exactly when this is needed, then tells
+# px4-rc.gzsim to attach to this already-spawned model instead of spawning
+# its own -- so this block and that env var are always used together.
+if [ -n "${PX4_GZ_MODEL_NAME:-}" ]; then
+	MODEL_SDF="$REPO_DIR/simulation/models/$MODEL/model.sdf"
+	[ -f "$MODEL_SDF" ] || die "model '$MODEL' needs custom spawn handling (PX4_GZ_MODEL_NAME=$PX4_GZ_MODEL_NAME set) but $MODEL_SDF does not exist"
+
+	SPAWN_REQ="$(cd "$REPO_DIR" && python -m simulation.instance_spec "${SPEC_ARGS[@]}" --gz-spawn-request "$MODEL_SDF")"
+	SPAWN_REPLY="$(timeout 10 gz service -s "/world/$SPEC_WORLD/create" \
+		--reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 5000 \
+		--req "$SPAWN_REQ" 2>&1)"
+	# gz service's own exit code only reflects whether the RPC round-tripped,
+	# not whether entity creation actually succeeded -- that is the boolean
+	# reply body, which must be checked explicitly ("confirm, don't assume",
+	# the same principle M6's whole fault-injection design rests on).
+	echo "$SPAWN_REPLY" | grep -q "data: true" ||
+		die "failed to spawn model '$PX4_GZ_MODEL_NAME': $SPAWN_REPLY"
+	echo "  model       spawned $PX4_GZ_MODEL_NAME (custom spawn path: $MODEL_SDF)"
+
+	# px4-rc.gzsim's own spawn branch (the one this bypasses) also sets the
+	# world's physics speed factor as part of spawning -- replicated here so
+	# it is not silently lost for a worker started with -m other than the
+	# default.
+	timeout 10 gz service -s "/world/$SPEC_WORLD/set_physics" \
+		--reqtype gz.msgs.Physics --reptype gz.msgs.Boolean --timeout 5000 \
+		--req "real_time_factor: $SPEED" >/dev/null 2>&1
+fi
+
 LOG_PX4="$LOG_DIR/px4_instance_${INSTANCE}_${STAMP}.log"
 PID_PX4="$(start_detached "$LOG_PX4" "$PX4_BIN" -i "$INSTANCE" -d)"
 ln -sf "$LOG_PX4" "$LOG_DIR/px4_instance_${INSTANCE}_latest.log"

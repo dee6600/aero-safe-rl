@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from experiments.episode_schema import FEATURE_VERSION_UNSET, SCHEMA_VERSION, TerminationReason, digest
+from experiments.fault_schedule import FaultProfile, FaultSpec
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -90,7 +91,8 @@ class EpisodeRunner:
     def __init__(self, spec, *, run_id: str, mission_id: str, mission: dict,
                  mission_digest: str, env_versions_json: str,
                  results_dir: str | Path = "results",
-                 feature_version: str = FEATURE_VERSION_UNSET):
+                 feature_version: str = FEATURE_VERSION_UNSET,
+                 enable_rotor_fault: bool = False):
         self.spec = spec
         self.run_id = run_id
         self.mission_id = mission_id
@@ -99,6 +101,9 @@ class EpisodeRunner:
         self.env_versions_json = env_versions_json
         self.feature_version = feature_version
         self.spec_digest = digest(spec.to_dict())
+        # M6: off by default, so every M3/M4/M5 caller is unaffected. Only
+        # M6's dataset generator (task 9) passes True.
+        self.enable_rotor_fault = enable_rotor_fault
 
         from aero_bridge.episode_logger import EpisodeLogger
         self.logger = EpisodeLogger(run_id, worker_id=spec.instance, results_dir=results_dir)
@@ -119,12 +124,25 @@ class EpisodeRunner:
         self.clock = PX4Clock(now_us_fn=self.gz_clock.now_us,
                                pump_fn=lambda t: rclpy.spin_once(self.node, timeout_sec=t))
 
+        if self.enable_rotor_fault:
+            from simulation.rotor_fault import RotorFaultController
+            # A hard reset restarts the OS-level gz sim/px4/MicroXRCEAgent
+            # processes for this worker; whether an old gz.transport13.Node
+            # from the same GZ_PARTITION would silently keep working against
+            # the new process is exactly the kind of thing CLAUDE.md says not
+            # to assume, so this is rebuilt here unconditionally, the same as
+            # every other ROS-side object _build_ros_objects owns.
+            self.rotor_fault = RotorFaultController(self.spec)
+            self.rotor_fault.wait_for_heartbeat()
+
     def close(self) -> None:
         """Releases this worker's ROS-side objects. Does NOT stop the
         underlying PX4/Gazebo OS processes -- that is WorkerSupervisor's job
         (simulation/worker_process.py), not this class's."""
         self.gz_clock.close()
         self.node.destroy_node()
+        if self.enable_rotor_fault:
+            self.rotor_fault.close()
 
     def rebuild_after_hard_reset(self) -> None:
         """Call after aero_bridge.reset.hard_reset() returns: the OLD node/
@@ -134,7 +152,8 @@ class EpisodeRunner:
         self._build_ros_objects()
 
     def run_episode(self, *, episode_id: str, reset_tier: str, seed: int,
-                     on_step=None) -> dict:
+                     on_step=None, fault_spec: Optional[FaultSpec] = None,
+                     fault_config_digest: str = "none") -> dict:
         """Runs exactly one episode at the given (already-decided) reset
         tier: apply the reset, fly the mission, log and return the summary
         record. Never raises ResetError itself for a *known-recoverable*
@@ -150,6 +169,15 @@ class EpisodeRunner:
         entirely, which is what keeps this class a pure "fly one episode"
         primitive rather than something that also half-knows about SimFarm.
 
+        `fault_spec` (M6), if given, drives rotor-fault injection during the
+        flight via self.rotor_fault (constructed only when this runner was
+        built with enable_rotor_fault=True -- passing a fault_spec without
+        that raises, rather than silently flying a healthy episode when a
+        fault was actually requested). A healthy FaultSpec
+        (fault_applied=False) is a legitimate value: it means "this episode
+        is one of the dataset's negative examples", not "no fault system in
+        use" -- the requested-side fields are still recorded either way.
+
         Raises aero_bridge.reset.ResetError if the requested reset tier
         itself fails (the caller decides whether/how to escalate and retry;
         run_episodes.py and sim_farm.py both do this identically via
@@ -157,6 +185,12 @@ class EpisodeRunner:
         """
         from aero_bridge.mission_executor import fly_mission
         from aero_bridge.reset import hard_reset, medium_reset, soft_reset
+
+        if fault_spec is not None and not self.enable_rotor_fault:
+            raise ValueError(
+                "fault_spec given but this EpisodeRunner was built with "
+                "enable_rotor_fault=False -- construct it with "
+                "enable_rotor_fault=True to inject faults")
 
         tier_used = "none"
         reset_wall_duration_s = 0.0
@@ -193,7 +227,66 @@ class EpisodeRunner:
                 raise ValueError(f"unknown reset_tier {reset_tier!r}")
             tier_used, reset_wall_duration_s = r.tier, r.wall_duration_s
 
+        if self.enable_rotor_fault:
+            # A soft/medium reset (unlike hard) keeps the same gz sim
+            # process alive, and with it the same RotorDegradationSystem
+            # plugin instance -- a fault commanded during the PREVIOUS
+            # episode would otherwise still be active when this one's
+            # flight starts, regardless of this episode's own onset_time_s.
+            # Idempotent and cheap, so cleared unconditionally rather than
+            # only for the tiers where it would actually matter.
+            self.rotor_fault.clear_rotor_fault()
+
+        fault_state = {
+            "mission_start_t_sim_s": None,
+            "commanded": False,
+            "ramp_start_t_sim_s": None,
+            "onset_time_s_observed": None,
+            "confirmed_applied": False,
+            "confirmed_severity_final": 0.0,
+        }
+
+        def _drive_rotor_fault(row: dict) -> None:
+            """Advances fault_spec's onset/ramp against this tick's sim
+            time, and records what the plugin's own status echo confirms
+            was actually applied -- the "confirm, don't assume" loop this
+            whole milestone exists for. A no-op for a healthy fault_spec
+            (fault_applied=False): the requested-side fields are already
+            correct sentinels, and there is nothing to command or confirm.
+            """
+            if fault_spec is None or not fault_spec.fault_applied:
+                return
+            t_sim_s = row.get("t_sim_s")
+            if t_sim_s is None:
+                return
+            if fault_state["mission_start_t_sim_s"] is None:
+                fault_state["mission_start_t_sim_s"] = t_sim_s
+            elapsed = t_sim_s - fault_state["mission_start_t_sim_s"]
+
+            if elapsed >= fault_spec.onset_time_s:
+                if fault_spec.profile == FaultProfile.STEP:
+                    if not fault_state["commanded"]:
+                        self.rotor_fault.set_rotor_fault(fault_spec.rotor_index, fault_spec.severity)
+                        fault_state["commanded"] = True
+                elif fault_spec.profile == FaultProfile.RAMP:
+                    if fault_state["ramp_start_t_sim_s"] is None:
+                        fault_state["ramp_start_t_sim_s"] = t_sim_s
+                    ramp_elapsed = t_sim_s - fault_state["ramp_start_t_sim_s"]
+                    frac = (min(1.0, ramp_elapsed / fault_spec.ramp_duration_s)
+                            if fault_spec.ramp_duration_s > 0 else 1.0)
+                    self.rotor_fault.set_rotor_fault(fault_spec.rotor_index, fault_spec.severity * frac)
+
+            if (self.rotor_fault.latest_applied
+                    and self.rotor_fault.latest_rotor_index == fault_spec.rotor_index):
+                if fault_state["onset_time_s_observed"] is None:
+                    fault_state["onset_time_s_observed"] = elapsed
+                fault_state["confirmed_severity_final"] = self.rotor_fault.latest_severity
+                if abs(self.rotor_fault.latest_severity - fault_spec.severity) < 1e-2:
+                    fault_state["confirmed_applied"] = True
+
         def _on_step(row, _episode_id=episode_id):
+            if self.enable_rotor_fault:
+                _drive_rotor_fault(row)
             self.logger.log_step(dict(row, schema_version=SCHEMA_VERSION, run_id=self.run_id,
                                        episode_id=_episode_id, worker_id=self.spec.instance))
             if on_step is not None:
@@ -231,6 +324,31 @@ class EpisodeRunner:
             final_pos_x=last_step["pos_x"] if last_step else float('nan'),
             final_pos_y=last_step["pos_y"] if last_step else float('nan'),
             final_pos_z=last_step["pos_z"] if last_step else float('nan'),
+            # (fault_spec or FaultSpec.healthy(0)).to_episode_fields() supplies
+            # the REQUESTED-side fields either way (CLAUDE.md §7 -- one
+            # implementation of what "no fault" means, not a second copy of
+            # these literals here); fault_config_digest is the caller's
+            # concern (M6 task 9's dataset generator sets it from the fault
+            # schedule config actually in use -- this class has no fault
+            # config of its own to digest).
+            fault_config_digest=(fault_config_digest if fault_spec is not None else "none"),
+            **(fault_spec or FaultSpec.healthy(0)).to_episode_fields(),
+            # OBSERVED/CONFIRMED fields are genuinely runtime-only and have no
+            # "no fault requested" analogue in FaultSpec -- filled in from
+            # fault_state, which _drive_rotor_fault populated from the
+            # plugin's own status echo (never assumed from the command alone).
+            fault_onset_time_s_observed=(
+                fault_state["onset_time_s_observed"]
+                if fault_state["onset_time_s_observed"] is not None else float('nan')),
+            fault_confirmed_applied=fault_state["confirmed_applied"],
+            fault_confirmed_severity_final=fault_state["confirmed_severity_final"],
+            # A real, honest computation from this episode's own telemetry --
+            # not a placeholder -- since px4_failure_detector_status (schema
+            # v4) is logged on every step regardless of whether a fault was
+            # ever commanded (mission_executor.py's record_step()).
+            px4_failure_detector_silent=all(
+                s["px4_failure_detector_status"] == 0 for s in result.steps
+            ) if result.steps else True,
         )
         self.logger.write_episode(summary)
         return summary

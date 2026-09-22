@@ -10,6 +10,14 @@ TerminationReason and ResetTier are Python enums so the rest of the codebase
 gets typed values instead of bare strings; test_termination_reason_enum_closed
 pins them equal to the schema file's termination_reasons/reset_tiers lists so
 the two representations cannot drift apart silently.
+
+FaultType and FaultProfile (v4, M6 task 2) are NOT redefined here -- they are
+imported from experiments.fault_schedule, which already owns them (a fault
+schedule has to define what a fault type/profile IS before anything can
+sample one). Re-declaring a second copy here would be exactly the drift
+CLAUDE.md §1.4 forbids; test_fault_type_enum_closed/test_fault_profile_enum_
+closed pin the imported enums equal to this schema file's fault_types/
+fault_profiles lists, the same pattern as termination_reason/reset_tier.
 """
 from __future__ import annotations
 
@@ -21,8 +29,10 @@ from typing import Any, Mapping
 
 import yaml
 
+from experiments.fault_schedule import FaultProfile, FaultType
+
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "configs" / "schema" / "episode_record.yaml"
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 # configs/features.yaml now defines a real feature_version ("1", as of M5),
 # but no writer in this repo computes and tags actual feature vectors yet --
@@ -119,6 +129,17 @@ def validate_episode(record: Mapping[str, Any]) -> None:
     valid_tiers = set(schema["reset_tiers"])
     if tier not in valid_tiers:
         raise SchemaValidationError(f"reset_tier {tier!r} is not one of {sorted(valid_tiers)}")
+
+    fault_type = record.get("fault_type")
+    valid_fault_types = set(schema["fault_types"])
+    if fault_type not in valid_fault_types:
+        raise SchemaValidationError(f"fault_type {fault_type!r} is not one of {sorted(valid_fault_types)}")
+
+    fault_profile = record.get("fault_profile")
+    valid_fault_profiles = set(schema["fault_profiles"])
+    if fault_profile not in valid_fault_profiles:
+        raise SchemaValidationError(
+            f"fault_profile {fault_profile!r} is not one of {sorted(valid_fault_profiles)}")
 
 
 def validate_step(row: Mapping[str, Any]) -> None:

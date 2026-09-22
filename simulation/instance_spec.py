@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -46,6 +47,48 @@ MAX_ROS_DOMAIN_ID = 101
 
 DEFAULT_MODEL = "x500"
 DEFAULT_WORLD = "default"
+
+# Models this project builds itself (under simulation/models/, e.g. M6's
+# x500_aero) need TWO things PX4's own unmodified startup scripts do not do
+# for a model by that name, both confirmed by reading PX4 v1.17.0 source,
+# not guessed, after a live failure caught the wrong first assumption:
+#
+# 1. rcS (ROMFS/px4fmu_common/init.d-posix/rcS) selects which airframe
+#    script to source by pattern-matching PX4_SIM_MODEL against airframe
+#    FILENAMES on the form "[0-9]+_${PX4_SIM_MODEL}" -- a project-local
+#    model has no matching airframe FILE in PX4's own tree, so this lookup
+#    fails outright with "Unknown model ... (not found by name)" before PX4
+#    gets anywhere near spawning anything. rcS checks PX4_SYS_AUTOSTART
+#    FIRST, though, and uses it directly if set, skipping the by-name
+#    lookup entirely -- so a model built as an x500 derivative (same
+#    airframe/control-allocation parameters, only the spawned gz model
+#    differs) can reuse x500's own existing airframe file (4001_gz_x500) by
+#    setting PX4_SYS_AUTOSTART=4001 explicitly.
+# 2. px4-rc.gzsim's own spawn logic is NOT a generic "model://$MODEL_NAME"
+#    resolution (that was the wrong first assumption, caught live): it
+#    hardcodes "${PX4_GZ_MODELS}/${MODEL_NAME}/model.sdf", where
+#    PX4_GZ_MODELS always points at PX4's OWN models directory (PX4's own
+#    gz_env.sh unconditionally re-exports it, clobbering any override set
+#    beforehand) -- so it can never find a project-local model either. The
+#    fix: PX4_GZ_MODEL_NAME tells px4-rc.gzsim to ATTACH to an
+#    already-spawned model instead of spawning one, and the launcher
+#    (scripts/sim_start.sh) does the spawning itself beforehand, via
+#    gz_spawn_request() below, using an absolute file path instead of a
+#    PX4_GZ_MODELS-relative one.
+#
+# Both fixes need zero changes to ~/projects/PX4-Autopilot (CLAUDE.md rule
+# 1), and both are driven from this one dict, so there is exactly one place
+# that knows "this model needs the custom path" -- not a second,
+# independent check anywhere else (px4_env(), gz_spawn_request(),
+# scripts/sim_start.sh all key off it, or off px4_env()'s own output).
+#
+# Only listed here for models this project actually uses that need it --
+# "x500" itself is deliberately absent: PX4's own mechanisms already work
+# for it today, so overriding either would be a needless second source of
+# truth for the common case.
+_AUTOSTART_OVERRIDE_FOR_MODEL = {
+    "x500_aero": 4001,  # M6: rotor-fault model, same airframe as x500 itself
+}
 
 #: Direction segment of a PX4 DDS topic name. ``out`` is PX4 publishing to us.
 _TOPIC_DIRECTIONS = ("in", "out")
@@ -179,7 +222,7 @@ class InstanceSpec:
         own transport node, so both ends need it or the instance silently joins
         a neighbour's world.
         """
-        return {
+        env = {
             "PX4_SIM_MODEL": f"gz_{self.model}",
             "PX4_GZ_WORLD": self.world,
             "PX4_GZ_STANDALONE": "1",
@@ -191,6 +234,65 @@ class InstanceSpec:
             "GZ_PARTITION": self.gz_partition,
             "GZ_IP": "127.0.0.1",
         }
+        if self.model in _AUTOSTART_OVERRIDE_FOR_MODEL:
+            env["PX4_SYS_AUTOSTART"] = str(_AUTOSTART_OVERRIDE_FOR_MODEL[self.model])
+            # Tells px4-rc.gzsim to ATTACH to an already-spawned model
+            # instead of trying to spawn one itself -- required together
+            # with the launcher's own gz_spawn_request() pre-spawn step
+            # (scripts/sim_start.sh), since px4-rc.gzsim's own spawn path
+            # can never find a project-local model (see gz_spawn_request()'s
+            # docstring for why). Both live behind the same membership
+            # check, in the same dict, so there is exactly one place that
+            # knows "this model needs the custom path" -- not a second,
+            # independent filesystem check in the shell launcher.
+            env["PX4_GZ_MODEL_NAME"] = self.model_name
+        return env
+
+    def gz_spawn_request(self, sdf_path: str | Path) -> str:
+        """Text-format ``gz.msgs.EntityFactory`` request to spawn this
+        worker's model directly by absolute SDF file path.
+
+        Needed for exactly the same reason ``_AUTOSTART_OVERRIDE_FOR_MODEL``
+        exists: px4-rc.gzsim (``~/projects/PX4-Autopilot``, unmodified,
+        confirmed from source, M6) only ever spawns a model from
+        ``"${PX4_GZ_MODELS}/${MODEL_NAME}/model.sdf"`` -- a hardcoded path
+        under PX4's OWN models directory, never resolved via
+        ``GZ_SIM_RESOURCE_PATH``'s generic ``model://`` search the way a
+        nested ``<include>`` inside an SDF file is. A project-local model
+        under ``simulation/models/`` can therefore never be found that way,
+        no matter what ``GZ_SIM_RESOURCE_PATH`` contains, and
+        ``PX4_GZ_MODELS`` itself cannot be overridden either: PX4's own
+        ``gz_env.sh`` unconditionally re-exports it every time px4-rc.gzsim
+        sources it, clobbering any override set beforehand.
+
+        The fix that needs neither: spawn the model ourselves, by absolute
+        path, via this request (``sdf_filename``, not ``model://``), then
+        tell PX4 to *attach* to the already-spawned model instead of
+        spawning one itself, via ``PX4_GZ_MODEL_NAME`` in ``px4_env()``.
+        Used together, never alone.
+
+        roll/pitch/yaw -> quaternion uses the same extrinsic X-Y-Z
+        (roll first, then pitch, then yaw, all about world axes) convention
+        SDF's own ``<pose>`` element uses, so this produces the same
+        orientation px4-rc.gzsim's own file://-embedded ``<pose>`` tag would
+        have for the same six numbers.
+        """
+        x, y, z, roll, pitch, yaw = self.spawn_pose
+        cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+        cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+        cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+        qw = cr * cp * cy + sr * sp * sy
+        qx = sr * cp * cy - cr * sp * sy
+        qy = cr * sp * cy + sr * cp * sy
+        qz = cr * cp * sy - sr * sp * cy
+
+        sdf_path_str = str(Path(sdf_path).resolve())
+        return (
+            f'sdf_filename: "{sdf_path_str}", name: "{self.model_name}", '
+            f'allow_renaming: false, '
+            f'pose: {{ position: {{ x: {x}, y: {y}, z: {z} }}, '
+            f'orientation: {{ x: {qx}, y: {qy}, z: {qz}, w: {qw} }} }}'
+        )
 
     # --------------------------------------------------------------- (de)ser
 
@@ -279,6 +381,13 @@ def _main() -> int:
         action="store_true",
         help="emit SPEC_* shell assignments for a launcher to eval",
     )
+    ap.add_argument(
+        "--gz-spawn-request",
+        metavar="SDF_PATH",
+        default=None,
+        help="emit a gz.msgs.EntityFactory --req string to spawn SDF_PATH directly "
+             "(M6 -- see InstanceSpec.gz_spawn_request's docstring)",
+    )
     args = ap.parse_args()
 
     pose = None
@@ -299,7 +408,9 @@ def _main() -> int:
         print(f"ERROR: {exc}", flush=True)
         return 1
 
-    if args.env:
+    if args.gz_spawn_request:
+        print(spec.gz_spawn_request(args.gz_spawn_request))
+    elif args.env:
         for key, value in spec.px4_env().items():
             print(f"export {key}={_shell_quote(value)}")
     elif args.shell:
