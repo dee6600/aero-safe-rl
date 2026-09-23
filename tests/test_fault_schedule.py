@@ -18,6 +18,7 @@ from experiments.fault_schedule import (
     FaultProfile,
     FaultSpec,
     FaultType,
+    commanded_severity,
     load_fault_config,
     sample_fault_schedule,
     validate_fault_config,
@@ -219,3 +220,24 @@ def test_sample_fault_schedule_does_not_mutate_config():
     before = copy.deepcopy(cfg)
     sample_fault_schedule(cfg, np.random.default_rng(9), 50)
     assert cfg == before
+
+
+# --- commanded_severity (M7 task 1): the one definition of a fault's time
+# profile, shared by EpisodeRunner (commanding) and the detector dataset
+# (labelling). ---
+
+@pytest.mark.parametrize("profile, ramp_s, t, expected", [
+    (FaultProfile.STEP, 0.0, -0.1, 0.0),
+    (FaultProfile.STEP, 0.0, 0.0, 0.6),
+    (FaultProfile.STEP, 0.0, 30.0, 0.6),
+    (FaultProfile.RAMP, 2.0, -0.1, 0.0),
+    (FaultProfile.RAMP, 2.0, 0.0, 0.0),
+    (FaultProfile.RAMP, 2.0, 0.5, 0.15),
+    (FaultProfile.RAMP, 2.0, 2.0, 0.6),
+    (FaultProfile.RAMP, 2.0, 9.0, 0.6),
+    (FaultProfile.RAMP, 0.0, 0.0, 0.6),   # zero-length ramp degenerates to a step
+    (FaultProfile.NONE, 0.0, 5.0, 0.0),
+    ("ramp", 2.0, 1.0, 0.3),               # profile as read back from a parquet string column
+])
+def test_commanded_severity(profile, ramp_s, t, expected):
+    assert commanded_severity(0.6, profile, ramp_s, t) == pytest.approx(expected)

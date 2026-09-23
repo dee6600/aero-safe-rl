@@ -72,7 +72,7 @@ the comparison are already in the same clock domain.
 - Python 3.10.20
 - PyTorch 2.13.0+cu126, CUDA available: `True`
 - Gymnasium 1.3.0, Stable-Baselines3 2.9.0
-- NumPy 2.2.6, SciPy 1.15.3, pandas 2.3.3, PyYAML 6.0.3, matplotlib 3.10.9,
+- NumPy 2.2.6, SciPy 1.15.3, scikit-learn 1.7.2 (added M7), pandas 2.3.3, PyYAML 6.0.3, matplotlib 3.10.9,
   TensorBoard 2.21.0
 - Full frozen spec: `environment.yml` (repo root)
 

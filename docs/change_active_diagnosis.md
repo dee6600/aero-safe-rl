@@ -2,7 +2,7 @@
 
 **Status: DEFERRED until after the MVP (decided 2026-09-23).** Nothing in this
 document is part of the current plan, including Part A. The project finishes
-its MVP first (M7–M10 as already planned in `milestones.md`); this proposal is
+its MVP first (M7–M10 as already planned in `milestones.md`; M7 is now done); this proposal is
 kept as the starting point for a future update. When it is picked up, re-check
 it against the repository first, since it describes the state as of 2026-09-23.
 
@@ -491,6 +491,13 @@ shared in `configs/features.yaml` — the same test that already guards
   record (§4). The delivered 750-episode dataset is kept as is.
 
 ### M7 — addendum
+
+*(Note, 2026-09-23: M7 shipped without this addendum. Its detector is a 5-way
+{healthy, rotor 0..3} softmax plus a severity regression, from a
+temperature-scaled 5-member ensemble; ECE is reported (0.004), but there is no
+K = 9 severity-class head and no reliability diagram. Re-plan this addendum
+against `ai/detector/` and `docs/detector_results.md` when the proposal is
+picked up.)*
 
 - The model's head becomes a `K = 9` softmax over severity classes (D15), not a
   scalar plus a hand-made uncertainty proxy. Temperature-scaled on a held-out

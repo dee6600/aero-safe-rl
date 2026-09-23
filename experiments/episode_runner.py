@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from experiments.episode_schema import FEATURE_VERSION_UNSET, SCHEMA_VERSION, TerminationReason, digest
-from experiments.fault_schedule import FaultProfile, FaultSpec
+from experiments.fault_schedule import FaultProfile, FaultSpec, commanded_severity
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -272,9 +272,10 @@ class EpisodeRunner:
                     if fault_state["ramp_start_t_sim_s"] is None:
                         fault_state["ramp_start_t_sim_s"] = t_sim_s
                     ramp_elapsed = t_sim_s - fault_state["ramp_start_t_sim_s"]
-                    frac = (min(1.0, ramp_elapsed / fault_spec.ramp_duration_s)
-                            if fault_spec.ramp_duration_s > 0 else 1.0)
-                    self.rotor_fault.set_rotor_fault(fault_spec.rotor_index, fault_spec.severity * frac)
+                    self.rotor_fault.set_rotor_fault(
+                        fault_spec.rotor_index,
+                        commanded_severity(fault_spec.severity, fault_spec.profile,
+                                           fault_spec.ramp_duration_s, ramp_elapsed))
 
             if (self.rotor_fault.latest_applied
                     and self.rotor_fault.latest_rotor_index == fault_spec.rotor_index):

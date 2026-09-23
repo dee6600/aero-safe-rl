@@ -91,6 +91,18 @@ def sim_worker_x500_aero():
 
 
 @pytest.fixture
+def sim_workers_0_1_x500_aero():
+    """Two concurrent x500_aero workers (instances 0 and 1) at 1x -- the
+    speed factor the M6 dataset, and so the M7 detector's training data,
+    was flown at."""
+    _sim_stop_all()
+    _sim_start(0, speed=1, model="x500_aero")
+    _sim_start(1, speed=1, model="x500_aero")
+    yield (0, 1)
+    _sim_stop_all()
+
+
+@pytest.fixture
 def clean_sim_slate():
     """Guarantees nothing is running before AND after a test, but starts
     nothing itself -- for M4's SimFarm, which does its own starting via

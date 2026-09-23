@@ -137,6 +137,11 @@ test confirms the ramp's velocity-scaling arithmetic is exact).
 
 ## What this means for M7
 
+*(M7 is done. It applied the points below with a finer inclusion rule: a
+fault whose onset time fell after the mission ended is labelled healthy, and
+ramps cut short are labelled at their instantaneous severity. See
+`milestones.md` M7 task 1 and `docs/detector_results.md`.)*
+
 - The 465 confirmed-applied faulty episodes (spanning the full severity/
   rotor/profile space above) plus the 153 healthy episodes are the dataset's
   real, trustworthy labelled examples. An unconfirmed faulty episode is not

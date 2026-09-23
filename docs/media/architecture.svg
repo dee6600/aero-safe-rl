@@ -1,0 +1,209 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" role="img" aria-labelledby="t d">
+<title id="t">aero-safe-rl architecture</title>
+<desc id="d">Left: Isaac Lab trains the recovery policy on 8,192 parallel drones. Middle: the two conda environments exchange only files (observation/action spec, normalisation stats, policy checkpoint, fault fixture). Right: the PX4-in-the-loop stack (Gazebo, stock PX4, ROS 2, AI fault detector, recovery policy) produces every reported number. The policy only sends high-level commands, never motor commands.</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#131c38"/>
+  </linearGradient>
+  <pattern id="bricks" width="16" height="12" patternUnits="userSpaceOnUse">
+    <rect width="16" height="12" fill="#2a1216"/>
+    <path d="M0 0.5H16M0 6.5H16M8 0.5V6.5M0 6.5V12M16 6.5V12" stroke="#f87171" stroke-opacity="0.45" stroke-width="1"/>
+  </pattern>
+  <symbol id="mini" viewBox="-10 -10 20 20">
+    <path d="M-6 -6L6 6M6 -6L-6 6" stroke="#2dd4bf" stroke-width="1.6"/>
+    <circle cx="-6" cy="-6" r="3" fill="none" stroke="#2dd4bf" stroke-width="1.3"/>
+    <circle cx="6" cy="-6" r="3" fill="none" stroke="#2dd4bf" stroke-width="1.3"/>
+    <circle cx="-6" cy="6" r="3" fill="none" stroke="#2dd4bf" stroke-width="1.3"/>
+    <circle cx="6" cy="6" r="3" fill="none" stroke="#2dd4bf" stroke-width="1.3"/>
+    <rect x="-2" y="-2" width="4" height="4" fill="#2dd4bf"/>
+  </symbol>
+  <marker id="aT" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2dd4bf"/></marker>
+  <marker id="aO" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fb923c"/></marker>
+  <marker id="aP" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#a78bfa"/></marker>
+  <marker id="aB" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#60a5fa"/></marker>
+  <marker id="aD" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b949e"/></marker>
+</defs>
+<style>
+  .flow { stroke-dasharray: 7 6; animation: flow 1s linear infinite; }
+  .slow { animation-duration: 2.2s; }
+  @keyframes flow { from { stroke-dashoffset: 26; } to { stroke-dashoffset: 0; } }
+  .tw { animation: tw 3.2s ease-in-out infinite; }
+  @keyframes tw { 0%,100% { opacity: .95; } 50% { opacity: .25; } }
+  .spin { transform-box: fill-box; transform-origin: center; animation: spin .35s linear infinite; }
+  .spin.sick { animation-duration: 1.6s; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: .15; } 50% { opacity: .85; } }
+  .glow { animation: glow 2.4s ease-in-out infinite; }
+  @keyframes glow { 0%,100% { stroke-opacity: .35; } 50% { stroke-opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+<rect width="1200" height="720" rx="18" fill="url(#bg)"/>
+<text x="40" y="52" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="25" font-weight="700" fill="#e6edf3">aero-safe-rl <tspan fill="#8b949e" font-weight="400">· train in the gym, sit the exam in PX4</tspan></text>
+<path d="M890 44H920" stroke="#fb923c" stroke-width="2.5" class="flow" marker-end="url(#aO)"/>
+<text x="928" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">live data</text>
+<rect x="990" y="37" width="14" height="16" rx="2" fill="none" stroke="#e6edf3" stroke-width="1.4"/><path d="M993 43H1001M993 47H1001" stroke="#e6edf3" stroke-width="1"/>
+<text x="1012" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">file</text>
+<circle cx="1055" cy="44" r="5" fill="#f87171" class="pulse"/>
+<text x="1066" y="48" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">fault</text>
+<rect x="30" y="85" width="400" height="480" rx="16" fill="#2dd4bf" fill-opacity="0.05" stroke="#2dd4bf" stroke-opacity="0.55" stroke-width="1.5"/>
+<text x="52" y="116" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" letter-spacing="2.5" fill="#2dd4bf">① THE GYM</text>
+<rect x="291" y="102" width="121" height="18" rx="9" fill="#2dd4bf" fill-opacity="0.15" stroke="#2dd4bf" stroke-opacity="0.6"/>
+<text x="351" y="114.5" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" font-weight="700" fill="#2dd4bf">M8b–M9 · BUILDING</text>
+<text x="52" y="144" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="20" font-weight="700" fill="#e6edf3">Isaac Lab trains the policy</text>
+<text x="52" y="164" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" fill="#8b949e">env isaacsim · Python 3.11 · GPU</text>
+<use href="#mini" x="60" y="180" width="20" height="20" class="tw" style="animation-delay:0.00s"/>
+<use href="#mini" x="96" y="180" width="20" height="20" class="tw" style="animation-delay:-0.57s"/>
+<use href="#mini" x="132" y="180" width="20" height="20" class="tw" style="animation-delay:-1.14s"/>
+<use href="#mini" x="168" y="180" width="20" height="20" class="tw" style="animation-delay:-1.71s"/>
+<use href="#mini" x="204" y="180" width="20" height="20" class="tw" style="animation-delay:-2.28s"/>
+<use href="#mini" x="240" y="180" width="20" height="20" class="tw" style="animation-delay:-2.85s"/>
+<use href="#mini" x="276" y="180" width="20" height="20" class="tw" style="animation-delay:-0.19s"/>
+<use href="#mini" x="312" y="180" width="20" height="20" class="tw" style="animation-delay:-0.76s"/>
+<use href="#mini" x="348" y="180" width="20" height="20" class="tw" style="animation-delay:-1.33s"/>
+<use href="#mini" x="384" y="180" width="20" height="20" class="tw" style="animation-delay:-1.90s"/>
+<use href="#mini" x="60" y="207" width="20" height="20" class="tw" style="animation-delay:-1.33s"/>
+<use href="#mini" x="96" y="207" width="20" height="20" class="tw" style="animation-delay:-1.90s"/>
+<use href="#mini" x="132" y="207" width="20" height="20" class="tw" style="animation-delay:-2.47s"/>
+<use href="#mini" x="168" y="207" width="20" height="20" class="tw" style="animation-delay:-3.04s"/>
+<use href="#mini" x="204" y="207" width="20" height="20" class="tw" style="animation-delay:-0.38s"/>
+<use href="#mini" x="240" y="207" width="20" height="20" class="tw" style="animation-delay:-0.95s"/>
+<use href="#mini" x="276" y="207" width="20" height="20" class="tw" style="animation-delay:-1.52s"/>
+<use href="#mini" x="312" y="207" width="20" height="20" class="tw" style="animation-delay:-2.09s"/>
+<use href="#mini" x="348" y="207" width="20" height="20" class="tw" style="animation-delay:-2.66s"/>
+<use href="#mini" x="384" y="207" width="20" height="20" class="tw" style="animation-delay:0.00s"/>
+<use href="#mini" x="60" y="234" width="20" height="20" class="tw" style="animation-delay:-2.66s"/>
+<use href="#mini" x="96" y="234" width="20" height="20" class="tw" style="animation-delay:0.00s"/>
+<use href="#mini" x="132" y="234" width="20" height="20" class="tw" style="animation-delay:-0.57s"/>
+<use href="#mini" x="168" y="234" width="20" height="20" class="tw" style="animation-delay:-1.14s"/>
+<use href="#mini" x="204" y="234" width="20" height="20" class="tw" style="animation-delay:-1.71s"/>
+<use href="#mini" x="240" y="234" width="20" height="20" class="tw" style="animation-delay:-2.28s"/>
+<use href="#mini" x="276" y="234" width="20" height="20" class="tw" style="animation-delay:-2.85s"/>
+<use href="#mini" x="312" y="234" width="20" height="20" class="tw" style="animation-delay:-0.19s"/>
+<use href="#mini" x="348" y="234" width="20" height="20" class="tw" style="animation-delay:-0.76s"/>
+<use href="#mini" x="384" y="234" width="20" height="20" class="tw" style="animation-delay:-1.33s"/>
+<use href="#mini" x="60" y="261" width="20" height="20" class="tw" style="animation-delay:-0.76s"/>
+<use href="#mini" x="96" y="261" width="20" height="20" class="tw" style="animation-delay:-1.33s"/>
+<use href="#mini" x="132" y="261" width="20" height="20" class="tw" style="animation-delay:-1.90s"/>
+<use href="#mini" x="168" y="261" width="20" height="20" class="tw" style="animation-delay:-2.47s"/>
+<use href="#mini" x="204" y="261" width="20" height="20" class="tw" style="animation-delay:-3.04s"/>
+<use href="#mini" x="240" y="261" width="20" height="20" class="tw" style="animation-delay:-0.38s"/>
+<use href="#mini" x="276" y="261" width="20" height="20" class="tw" style="animation-delay:-0.95s"/>
+<use href="#mini" x="312" y="261" width="20" height="20" class="tw" style="animation-delay:-1.52s"/>
+<use href="#mini" x="348" y="261" width="20" height="20" class="tw" style="animation-delay:-2.09s"/>
+<use href="#mini" x="384" y="261" width="20" height="20" class="tw" style="animation-delay:-2.66s"/>
+<use href="#mini" x="60" y="288" width="20" height="20" class="tw" style="animation-delay:-2.09s"/>
+<use href="#mini" x="96" y="288" width="20" height="20" class="tw" style="animation-delay:-2.66s"/>
+<use href="#mini" x="132" y="288" width="20" height="20" class="tw" style="animation-delay:0.00s"/>
+<use href="#mini" x="168" y="288" width="20" height="20" class="tw" style="animation-delay:-0.57s"/>
+<use href="#mini" x="204" y="288" width="20" height="20" class="tw" style="animation-delay:-1.14s"/>
+<use href="#mini" x="240" y="288" width="20" height="20" class="tw" style="animation-delay:-1.71s"/>
+<use href="#mini" x="276" y="288" width="20" height="20" class="tw" style="animation-delay:-2.28s"/>
+<use href="#mini" x="312" y="288" width="20" height="20" class="tw" style="animation-delay:-2.85s"/>
+<use href="#mini" x="348" y="288" width="20" height="20" class="tw" style="animation-delay:-0.19s"/>
+<use href="#mini" x="384" y="288" width="20" height="20" class="tw" style="animation-delay:-0.76s"/>
+<text x="230" y="334" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3">× 8,192 drones at once</text>
+<text x="230" y="354" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">546k env-steps/s, on a laptop RTX 2070</text>
+<rect x="52" y="372" width="356" height="48" rx="10" fill="#2dd4bf" fill-opacity="0.1" stroke="#2dd4bf" stroke-width="1.3"/>
+<text x="66" y="395" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">Python rotor model</text>
+<text x="66" y="413" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">same fault as Gazebo, cheaper physics</text>
+<path d="M230 420V428" stroke="#2dd4bf" stroke-width="2" marker-end="url(#aT)"/>
+<rect x="52" y="432" width="356" height="48" rx="10" fill="#2dd4bf" fill-opacity="0.1" stroke="#2dd4bf" stroke-width="1.3"/>
+<text x="66" y="455" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">Detector-output simulator</text>
+<text x="66" y="473" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">noise + lag fitted to the real detector</text>
+<path d="M230 480V488" stroke="#2dd4bf" stroke-width="2" marker-end="url(#aT)"/>
+<rect x="52" y="492" width="356" height="56" rx="10" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="66" y="515" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">PPO recovery policy</text>
+<text x="66" y="533" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">8,192 drones crash so one doesn't have to</text>
+<rect x="523" y="140" width="14" height="382" fill="url(#bricks)" opacity="0.9"/>
+<text x="530" y="108" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="700" letter-spacing="2.5" fill="#f87171">THE WALL</text>
+<text x="530" y="126" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#8b949e">files only · zero imports</text>
+<rect x="458" y="150" width="144" height="62" rx="8" fill="#0f172a" stroke="#fb923c" stroke-width="1.6"/>
+<path d="M588 150V162H602" fill="none" stroke="#fb923c" stroke-opacity="0.6"/>
+<text x="530" y="175" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" fill="#e6edf3">obs_v1 · action_v1</text>
+<text x="530" y="194" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">frozen contract</text>
+<path d="M455 181H434" stroke="#8b949e" stroke-width="1.8" marker-end="url(#aD)"/>
+<path d="M605 181H626" stroke="#8b949e" stroke-width="1.8" marker-end="url(#aD)"/>
+<rect x="458" y="250" width="144" height="62" rx="8" fill="#0f172a" stroke="#fb923c" stroke-width="1.6"/>
+<path d="M588 250V262H602" fill="none" stroke="#fb923c" stroke-opacity="0.6"/>
+<text x="530" y="275" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" fill="#e6edf3">norm stats</text>
+<text x="530" y="294" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">from healthy PX4 flights</text>
+<path d="M628 281H606" stroke="#8b949e" stroke-width="1.8" class="flow slow"/>
+<path d="M455 281H434" stroke="#8b949e" stroke-width="1.8" class="flow slow" marker-end="url(#aD)"/>
+<rect x="458" y="350" width="144" height="62" rx="8" fill="#0f172a" stroke="#2dd4bf" stroke-width="1.6" class="glow"/>
+<path d="M588 350V362H602" fill="none" stroke="#2dd4bf" stroke-opacity="0.6"/>
+<text x="530" y="375" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" fill="#e6edf3">policy.pt + digest</text>
+<text x="530" y="394" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">wrong digest? refused.</text>
+<path d="M432 381H454" stroke="#8b949e" stroke-width="1.8" class="flow slow"/>
+<path d="M605 381H626" stroke="#8b949e" stroke-width="1.8" class="flow slow" marker-end="url(#aD)"/>
+<rect x="458" y="450" width="144" height="62" rx="8" fill="#0f172a" stroke="#f87171" stroke-width="1.6"/>
+<path d="M588 450V462H602" fill="none" stroke="#f87171" stroke-opacity="0.6"/>
+<text x="530" y="475" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" fill="#e6edf3">fault fixture</text>
+<text x="530" y="494" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">same s = same thrust loss</text>
+<path d="M455 481H434" stroke="#8b949e" stroke-width="1.8" marker-end="url(#aD)"/>
+<path d="M605 481H626" stroke="#8b949e" stroke-width="1.8" marker-end="url(#aD)"/>
+<rect x="630" y="85" width="540" height="480" rx="16" fill="#fb923c" fill-opacity="0.05" stroke="#fb923c" stroke-opacity="0.55" stroke-width="1.5"/>
+<text x="652" y="116" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" letter-spacing="2.5" fill="#fb923c">② THE EXAM</text>
+<rect x="1006" y="102" width="146" height="18" rx="9" fill="#fb923c" fill-opacity="0.15" stroke="#fb923c" stroke-opacity="0.6"/>
+<text x="1079" y="114.5" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" font-weight="700" fill="#fb923c">EVERY REPORTED NUMBER</text>
+<text x="652" y="144" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="20" font-weight="700" fill="#e6edf3">PX4-in-the-loop evaluation</text>
+<text x="652" y="164" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" fill="#8b949e">env aero-safe-rl · Python 3.10 · ROS 2 Humble</text>
+<circle r="5" fill="#fb923c"><animateMotion dur="6s" repeatCount="indefinite" path="M1045 244V354H775V464H650V190H1045Z"/></circle>
+<circle r="5" fill="#a78bfa"><animateMotion dur="6s" begin="-3s" repeatCount="indefinite" path="M1045 244V354H775V464H650V190H1045Z"/></circle>
+<path d="M665 464H650V190H1045V209" fill="none" stroke="#a78bfa" stroke-width="2.2" class="flow slow" marker-end="url(#aP)"/>
+<rect x="700" y="181" width="330" height="18" fill="#141c36"/>
+<text x="865" y="194" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="700" fill="#a78bfa">slow down · divert · land  —  never a motor command</text>
+<rect x="665" y="212" width="220" height="64" rx="10" fill="#fb923c" fill-opacity="0.12" stroke="#fb923c" stroke-width="1.3"/>
+<path d="M684 229L714 259M714 229L684 259" stroke="#e6edf3" stroke-width="2.4"/>
+<rect x="694" y="239" width="10" height="10" rx="2" fill="#e6edf3"/>
+<circle cx="684" cy="229" r="8" fill="#101830" stroke="#e6edf3" stroke-width="1.4"/>
+<path d="M677 229H691" stroke="#e6edf3" stroke-width="2.2" stroke-linecap="round" class="spin"/>
+<circle cx="714" cy="229" r="8" fill="#101830" stroke="#e6edf3" stroke-width="1.4"/>
+<path d="M707 229H721" stroke="#e6edf3" stroke-width="2.2" stroke-linecap="round" class="spin"/>
+<circle cx="684" cy="259" r="8" fill="#101830" stroke="#e6edf3" stroke-width="1.4"/>
+<path d="M677 259H691" stroke="#e6edf3" stroke-width="2.2" stroke-linecap="round" class="spin"/>
+<circle cx="714" cy="259" r="11" fill="#f87171" class="pulse"/>
+<circle cx="714" cy="259" r="8" fill="#101830" stroke="#f87171" stroke-width="1.4"/>
+<path d="M707 259H721" stroke="#f87171" stroke-width="2.2" stroke-linecap="round" class="spin sick"/>
+<text x="743" y="238" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">Gazebo Harmonic</text>
+<text x="743" y="256" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">x500 + our fault plugin</text>
+<text x="743" y="271" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#f87171">rotor 3: "I'm fine."</text>
+<rect x="935" y="212" width="220" height="64" rx="10" fill="#22314E" stroke="#60a5fa" stroke-width="2"/>
+<path d="M950 236V231a5 5 0 0 1 10 0V236" fill="none" stroke="#60a5fa" stroke-width="2"/>
+<rect x="947" y="236" width="16" height="12" rx="2" fill="#60a5fa"/>
+<text x="973" y="238" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">PX4 SITL v1.17.0</text>
+<text x="973" y="256" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#b6c6e3">stock · never patched</text>
+<text x="973" y="271" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#b6c6e3">EKF2 · alloc · 250–1000 Hz</text>
+<rect x="935" y="322" width="220" height="64" rx="10" fill="#fb923c" fill-opacity="0.1" stroke="#fb923c" stroke-width="1.3"/>
+<text x="949" y="345" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">ROS 2 bridge</text>
+<text x="949" y="363" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">uXRCE-DDS telemetry</text>
+<text x="949" y="379" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">features @ 10 Hz</text>
+<rect x="665" y="322" width="220" height="64" rx="10" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="1.3"/>
+<text x="679" y="345" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">AI fault detector</text>
+<text x="679" y="363" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">which rotor? how bad?</text>
+<text x="679" y="379" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">how sure? · ~10 Hz</text>
+<rect x="813" y="313" width="64" height="18" rx="9" fill="#a78bfa" fill-opacity="0.15" stroke="#a78bfa" stroke-opacity="0.6"/>
+<text x="845" y="325.5" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" font-weight="700" fill="#a78bfa">M7 · DONE</text>
+<rect x="665" y="432" width="220" height="64" rx="10" fill="#a78bfa" fill-opacity="0.16" stroke="#a78bfa" stroke-width="2"/>
+<text x="679" y="455" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">Recovery policy</text>
+<text x="679" y="473" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">rules  vs  RL-from-the-gym</text>
+<text x="679" y="489" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">~5 Hz decisions</text>
+<rect x="935" y="432" width="220" height="64" rx="10" fill="#fb923c" fill-opacity="0.1" stroke="#fb923c" stroke-width="1.3"/>
+<text x="949" y="455" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#e6edf3">Episode records</text>
+<text x="949" y="473" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">versioned, validated</text>
+<text x="949" y="489" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">→ every number in the paper</text>
+<path d="M888 244H931" stroke="#fb923c" stroke-width="2.2" class="flow" marker-end="url(#aO)"/>
+<path d="M1045 279V318" stroke="#fb923c" stroke-width="2.2" class="flow" marker-end="url(#aO)"/>
+<path d="M932 354H889" stroke="#fb923c" stroke-width="2.2" class="flow" marker-end="url(#aO)"/>
+<path d="M775 389V428" stroke="#a78bfa" stroke-width="2.2" class="flow" marker-end="url(#aP)"/>
+<path d="M1125 389V428" stroke="#fb923c" stroke-width="2.2" class="flow" marker-end="url(#aO)"/>
+<text x="910" y="236" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8b949e">gz</text>
+<text x="1053" y="302" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8b949e">DDS</text>
+<text x="783" y="412" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8b949e">fault estimate</text>
+<text x="900" y="532" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">Each drone gets its own Gazebo server, its own clock, its own identity file.</text>
+<text x="900" y="550" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">Nobody shares a world. Nobody special-cases instance 0.</text>
+<rect x="30" y="588" width="1140" height="104" rx="14" fill="#ffffff" fill-opacity="0.04" stroke="#ffffff" stroke-opacity="0.12"/>
+<text x="600" y="624" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="18" font-weight="700" fill="#e6edf3">PX4 flies the drone. We're the backseat navigator.</text>
+<text x="600" y="650" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="14" fill="#8b949e">We say “slow down”, “go home”, “land”. We never grab the stick.</text>
+<text x="600" y="676" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" fill="#8b949e">the policy never sees the true fault · Isaac numbers are for training curves only · PX4 numbers go in the paper</text>
+</svg>

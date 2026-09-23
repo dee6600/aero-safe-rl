@@ -5,7 +5,7 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1, M1b, M3, M5 and M6 done. M4 substantially done
+Status: M0 (incl. addendum), M1, M1b, M3, M5, M6 and M7 done. M4 substantially done
 (one deferred sim-marked test, `tests/sim/test_worker_restart.py`, still
 open — see M4). M2 substantially done —
 both known multi-instance bugs fixed and verified; a third, subtler bug
@@ -233,8 +233,9 @@ discovering its bugs underneath a training run in M9.
 | M12 | Hexacopter extension | 2 wk | Medium | — |
 | M13 | Paper + reproducibility package | 3 wk | Low | — |
 
-**First real result** (worth showing anyone) arrives at the end of **M7**: "our
-detector spots a weakening motor that PX4 itself does not notice."
+**First real result** (worth showing anyone) arrived with **M7** (2026-09-23): "our
+detector spots a weakening motor that PX4 itself does not notice" —
+`docs/detector_results.md`.
 **First publishable result** arrives at the end of **M10**.
 
 ---
@@ -1539,7 +1540,8 @@ import rather than building their own.
      here — a magnitude-based, self-relative formula is correct regardless
      of that sign. **Documented as a first-cut heuristic**: its actual
      discriminative power against a real injected fault is an M6/M7
-     question, not asserted here.
+     question, not asserted here. *(Answered in M7: on its own it does not
+     discriminate, AUROC 0.40 — `docs/detector_results.md`.)*
    Also: `shared_feature_names()`, `px4_only_feature_names()`,
    `all_feature_names()`, reading `configs/features.yaml` once and caching it
    (same pattern as `episode_schema.load_schema()`).
@@ -2224,26 +2226,273 @@ scripts/sim_stop.sh --all
 
 ---
 
-# M7 — AI fault detector
+# M7 — AI fault detector ✅
 
-**Goal:** a model that reads a telemetry window and reports fault presence,
-type, severity, and confidence. The first genuinely novel result.
+**Goal:** a model that reads the telemetry stream and reports, every tick,
+fault presence, which rotor, severity, and how sure it is. The first
+genuinely novel result.
 
-**Depends on:** M5, M6. **Blocks:** M8, M9.
+**Depends on:** M5, M6. **Blocks:** M8, M8b (the detector-output simulator is
+fitted to this milestone's measured error), M9.
 
-**Key deliverables:**
-- Split the dataset **by episode, never by timestep** — this is the classic
-  data-leakage mistake in this kind of work (overlapping windows from one
-  flight landing in both train and test), and it's worth a dedicated test that
-  makes the wrong split structurally inexpressible, not just discouraged.
-- Baselines (threshold-on-residual, random forest) trained first, so the bar is
-  honest and dataset problems surface while the model is still simple.
-- Main model: a small 1D-CNN or GRU — not a Transformer, not at this data
-  scale.
-- Outputs include an uncertainty estimate, not just a point prediction — the
-  recovery policy needs to know when to distrust the detector.
-- Report accuracy **per severity level**, plus detection-delay distribution. A
-  single averaged accuracy number hides everything that actually matters here.
+**Started 2026-09-23.** Detail below written at start, per the stub policy.
+
+### What the M6 dataset actually looks like (measured 2026-09-23, before any design)
+
+A throwaway probe over `results/m6_dataset_v1/` settled three things the stub
+could only guess at. Numbers are per tick, on ticks after the fault has fully
+settled, healthy ticks taken after the first 10 s of flight:
+
+| severity | faulty rotor's command minus 4-rotor mean (median) | ticks over the healthy 99th percentile |
+|---|---|---|
+| healthy | 0.004 (p99 = 0.083) | 1% by construction |
+| [0.2, 0.4) | 0.164 | 98.4% |
+| [0.4, 0.6) | 0.399 | 99.4% |
+| [0.6, 0.8) | 0.476 | 99.3% |
+| [0.8, 1.0] | 0.467 | 99.4% |
+
+1. **A settled fault is easy.** One hand-written statistic — the largest
+   per-rotor motor command minus the mean of the four, averaged over the
+   1.5 s feature window — separates settled faults from healthy flight almost
+   perfectly, even at severity 0.2. "Which rotor" from the same statistic's
+   argmax is right 100 / 98 / 91 / 90% of the time by severity bucket.
+   A 10 s average instead of 1.5 s barely changes this, so *longer memory
+   buys little at steady state.*
+2. **Severity is the hard output.** The motor-command imbalance saturates
+   above about s = 0.4 (0.40 → 0.48 → 0.47): the healthy motors hit their
+   command limit and the imbalance stops growing. Severity above 0.4 must be
+   read from the *consequences* — rates, attitude error, position error,
+   `thrust_accel_residual` — not from the motor commands alone. Rotor
+   identification also degrades at high severity for the same reason.
+3. **The real detection problem is the transient** — the first second after
+   onset, and ramps still in progress, where the instantaneous severity is
+   small. That is where detection delay is decided, and delay is what the
+   recovery policy actually feels.
+
+**Consequence for what "beats the baselines" means.** Planning.md's exit
+criterion ("detector beats threshold and classical baselines") will almost
+certainly *not* hold on settled-fault AUROC — the threshold baseline is
+already near the ceiling. The honest comparison is on the axes where there is
+headroom: **detection delay** (onset → first sustained positive),
+**false alarms per healthy flight-hour**, **rotor-ID accuracy**,
+**severity error**, and **calibration** of the confidence output. A tie on
+AUROC is reported as a tie (anti-pattern 13 — the threshold baseline is not
+weakened to make the model look better).
+
+### Model choice — proposed and confirmed by the user 2026-09-23
+
+The stub said "a small 1D-CNN or GRU". The recommendation, from the data
+above, is a **rotor-symmetric streaming GRU with a deep-ensemble head**
+(working name `RotorGRU`):
+
+- **Streaming, not windowed.** A GRU consumes one feature vector per 10 Hz
+  tick and carries its hidden state across the whole episode (reset at
+  episode start). No window-length hyperparameter, one output per tick, and
+  it can accumulate evidence through an onset transient or a ramp — the one
+  place (point 3) where memory does matter. A windowed 1D-CNN recomputes from
+  scratch every tick over 15 frames and can only use what fits in 1.5 s.
+- **Rotor-symmetric encoder.** Before the GRU, a fixed (parameter-free)
+  transform re-expresses the inputs from each rotor's own point of view,
+  using the x500 geometry in PX4's own `4001_gz_x500` airframe
+  (`CA_ROTOR{0..3}_PX/PY/KM`): that rotor's command minus the mean; the body
+  roll/pitch rate and attitude projected onto the direction of that rotor's
+  arm; the yaw rate signed by that rotor's spin direction. **One shared
+  GRU** then processes each rotor's view (batch × 4), so the network learns
+  "what a weakening rotor looks like" once rather than four times — 4× the
+  effective data from 465 faulty episodes — and rotor identification falls
+  out as "which rotor's view looks worst". The global features
+  (velocities, position error, battery, residual) are concatenated to every
+  rotor's view.
+- **Output head** matches planning.md §7.2's detector output exactly:
+  a 5-way softmax {healthy, rotor 0..3} (giving `p(fault)` = 1 − p(healthy)
+  and the rotor class), a severity regression, and an uncertainty.
+- **Uncertainty from a 5-member deep ensemble** (5 independently seeded
+  copies — the net is ~10k parameters, so training 5 costs minutes on CPU),
+  plus temperature scaling on the validation split. Ensemble disagreement is
+  the most dependable uncertainty signal at this data scale, and M8b needs a
+  *calibrated* one to fit its detector-output simulator.
+
+Why not the alternatives: a plain windowed 1D-CNN (limited to 1.5 s, learns
+each rotor separately); a Transformer (not at 733 episodes); a pure
+physics/parameter-estimation observer (it is the right idea for settled
+faults, which is exactly what the threshold baseline already captures).
+
+Cost vs a plain GRU: about one extra day — the geometry transform and one
+test that relabelling the rotors consistently relabels the outputs. Side
+benefit, not the reason: the same network runs unchanged on a 6-rotor
+geometry for M12.
+
+### Tasks
+
+1. ✅ **Labelled dataset + episode-level split** (pure, no simulator, no
+   model). `ai/detector/dataset.py` loads a fault-dataset run directory into
+   one record per episode: the causal feature series from
+   `ai.features.feature_extractor.extract_series` (never a second feature
+   implementation) plus per-tick labels (`fault_active`, `rotor_class`,
+   `severity`). Labels come from the episode summary via one pure function,
+   `experiments.fault_schedule.commanded_severity()`, which
+   `EpisodeRunner` also uses to command the fault — so the label is, by
+   construction, what was sent to the plugin at that tick. Onset tick = the
+   first step whose elapsed time since the episode's first step reaches
+   `fault_onset_time_s_requested` (the runner's own clock reference;
+   measured plugin echo lag: median 0.10 s, p95 0.20 s).
+   Episode inclusion (measured counts on `m6_dataset_v1`):
+
+   | category | n | treatment |
+   | --- | --- | --- |
+   | fault applied (onset reached, plugin echoed within 1 s) | 486 | faulty labels at the instantaneous commanded severity (includes 25 ramps cut short by mission end) |
+   | fault commanded, onset after mission ended | 101 | all ticks healthy — physically healthy flights |
+   | healthy | 142 | all ticks healthy |
+   | onset reached but no echo, or echo 1.3–5.9 s late | 5 | excluded — onset time unverifiable |
+   | `valid=False` or zero steps | 16 | excluded |
+
+   `split_by_episode()` returns train/val/test **episode-id sets**
+   (70/15/15, stratified by healthy / severity bucket, seeded `Generator`),
+   and the only way to materialise training arrays takes a split and an
+   episode set — there is no function that accepts timestep indices. Split
+   digest recorded for later checkpoints.
+   **Done 2026-09-23.** On `m6_dataset_v1`: 729 episodes included, 361,504
+   ticks (54.8% fault-active), loads in ~50 s. Split at seed `20260923`:
+   510 / 109 / 110 episodes, digest `defe672652cd753d`, every severity
+   stratum present in every part. 11 ticks have NaN `battery_remaining`
+   — task 3's input normalisation must handle it, not drop the episodes.
+   24 tests in `tests/test_detector_dataset.py` plus 11 for
+   `commanded_severity` in `tests/test_fault_schedule.py`.
+2. ✅ **Metrics + baselines.** Detector metrics go in `experiments/metrics.py`
+   (M10's "one place any metric is computed" — created here, extended
+   there): per-severity AUROC, detection delay distribution (onset → first
+   positive sustained 0.5 s), false alarms per healthy flight-hour, rotor-ID
+   accuracy, severity MAE, expected calibration error. Baselines in
+   `ai/detector/baselines.py`: (a) threshold on the motor-imbalance
+   statistic above, with the same 0.5 s debounce; (b) threshold on
+   `thrust_accel_residual`; (c) random forest on window summary statistics.
+   Thresholds picked on val, reported on test. Adds `scikit-learn` to
+   `environment.yml`.
+   **Done 2026-09-23.** Threshold rule, applied identically to every
+   detector: the 99.5th percentile of the detector's own score on healthy
+   val ticks. scikit-learn 1.7.2 (+ joblib, threadpoolctl) installed and
+   pinned. 11 tests in `tests/test_detector_metrics.py` (hand-built
+   sequences with known answers), 7 in `tests/test_detector_baselines.py`.
+3. ✅ **Main model + training** — `ai/detector/model.py`, `ai/detector/train.py`.
+   The architecture confirmed from the section above. Checkpoint records
+   `feature_version`, the normalisation-stats digest, the split digest, and
+   the ensemble seeds; loading one with a mismatched digest raises.
+   **Done 2026-09-23.** Architecture exactly as proposed above: 9 rotor-local
+   + 7 global inputs, embed 32, GRU hidden 48, ~10k parameters per member.
+   Rotor geometry is a constant in `model.py`, checked against PX4's
+   airframe file by a test. Training: whole-episode BPTT, Adam 2e-3, early
+   stopping on val loss (patience 12). The 5 members stopped at epochs
+   16–54 with val loss 0.061–0.078. Temperature 1.1, alarm threshold
+   p = 0.097, both fitted on val. ~2 min total on the RTX 2070 (plus ~50 s
+   of data loading). The mirror-symmetry test holds to 1e-5 for arbitrary
+   weights. A deliberate mutation (ignoring spin direction) breaks it by
+   0.08, so the test is not vacuous. 9 tests in
+   `tests/test_detector_model.py`.
+4. ✅ **Evaluation report + M8b error model.** `ai/detector/evaluate.py` →
+   `docs/detector_results.md` (model vs all three baselines, every metric
+   per severity bucket and per profile, test split only) and
+   `results/m7_detector_v1/error_model.json` — the measured delay
+   distribution, false-alarm rate and severity-error-vs-true-severity that
+   M8b's detector-output simulator is fitted to.
+   **Done 2026-09-23.** Full tables and interpretation:
+   `docs/detector_results.md`. Headline, test split:
+   - **Weak faults (s 0.2–0.4):** median detection delay 0.88 s vs the
+     random forest's 1.18 s.
+   - **Rotor ID:** 98.6–99.8% accurate vs 93–96%.
+   - **Severity MAE:** 0.013–0.022 vs up to 0.116. The random forest
+     under-reads severity above s ≈ 0.4, as the probe predicted.
+   - **Confidence:** ECE 0.004, and uncertainty flags wrong calls with
+     AUROC 0.91.
+   - **Tick AUROC** is a tie (0.998 vs 0.997).
+   - **The model loses on false alarms:** 6 vs 4 in 0.69 healthy
+     flight-hours. All 6 are short (≤ 0.9 s) and fall around the first
+     waypoint turns.
+
+   The motor-imbalance threshold misses every weak fault because under
+   the shared protocol takeoff transients set its threshold: 94% of its
+   healthy exceedances are in the first 10 s. Reported with its cause;
+   not re-tuned. `thrust_accel_residual` alone measures AUROC 0.40, so
+   M5's open question about it is answered: on its own it is
+   uninformative.
+5. ✅ **Online runtime + live check.** `ai/detector/runtime.py`: a stateful
+   `DetectorRuntime` (`reset()` per episode, `step(frame) -> DetectorOutput`),
+   pure Python/torch, CPU, < 20 ms per tick. Verified live by attaching it
+   through `EpisodeRunner`'s existing `on_step` hook on **two concurrent
+   workers** with injected faults.
+   **Done 2026-09-23. Passed live**: instance 0 (rotor 1, s = 0.5) and
+   instance 1 (rotor 3, s = 0.3) flew at the same time, each with its own
+   Gazebo server, at 1×. Each alarmed 0.53 s / 0.59 s after onset on the
+   correct rotor, with no alarm before onset. Tick latency live: median
+   4.0 / 4.4 ms, p99 9.9 / 10.7 ms. `sim_stop.sh --all` left 0 processes.
+   **One real finding, fixed before it passed.** The first live run
+   failed the 20 ms budget: p99 34.5 ms, although the same code measured
+   3.9 ms median offline. A tick is dominated by per-operation overhead
+   (5 members run one after another, each re-doing the same input
+   transform), and two simulators competing for CPU multiplied that
+   overhead. Fixed with `StreamingEnsemble` in `model.py`: all members'
+   weights stacked into one set of batched operations, transform computed
+   once. That is 4× faster offline (0.98 ms median), and it matches batch
+   inference to 1e-7 on the trained weights. Batch/training keep
+   `nn.GRU`, and the streaming-equals-batch test covers the two paths.
+
+### Files created
+
+```
+ai/detector/__init__.py
+ai/detector/dataset.py              (task 1)
+experiments/metrics.py              (task 2)
+ai/detector/baselines.py            (task 2)
+ai/detector/model.py                (task 3; StreamingEnsemble added in task 5)
+ai/detector/train.py                (task 3)
+ai/detector/evaluate.py             (task 4)
+ai/detector/runtime.py              (task 5)
+docs/detector_results.md            (task 4)
+experiments/fault_schedule.py       (task 1 — commanded_severity())
+experiments/episode_runner.py       (task 1 — uses commanded_severity())
+environment.yml                     (task 2 — scikit-learn)
+```
+
+### Tests (required)
+
+```
+tests/test_detector_dataset.py      labels vs hand-computed step/ramp episodes, inclusion rules,
+                                    split disjoint + deterministic + stratified, no timestep split API
+tests/test_fault_schedule.py        (extended — commanded_severity)
+tests/test_detector_metrics.py      delay/false-alarm/AUROC on hand-built sequences with known answers
+tests/test_detector_baselines.py
+tests/test_detector_model.py        rotor-relabelling equivariance, causality (future ticks
+                                    cannot change past outputs), checkpoint digest mismatch raises
+tests/test_detector_runtime.py      streaming output == batch output on a recorded episode; reset works
+tests/sim/test_detector_live.py     two workers, injected fault, detector fires after onset
+tests/sim/conftest.py               (extended — sim_workers_0_1_x500_aero fixture, 1x)
+```
+
+### Done when
+
+- [x] Every metric in task 2 reported per severity bucket for the model and
+      all three baselines, on the **test episodes only**
+      (`docs/detector_results.md`).
+- [x] Model is better than the best baseline on detection delay at
+      s ∈ [0.2, 0.4) (median 0.88 s vs 1.18 s) and on severity MAE (0.018 vs
+      0.020 in that bucket, 0.013–0.022 vs up to 0.116 above it). It is
+      worse on false alarms (6 vs 4 events in 0.69 h), reported as such.
+- [x] `error_model.json` written and documented — M8b's input.
+- [x] Online inference < 20 ms/tick, verified live on two concurrent
+      workers (p99 ≤ 10.7 ms).
+- [x] Default test suite passes. **Caveat:** that tier now takes ~7.7 s,
+      over the 5 s target in CLAUDE.md §6. ~2 s of it is importing torch
+      and scikit-learn at collection.
+
+### Watch out for
+
+- Normalisation: use the frozen `configs/rl/normalization_v1.yaml` (healthy
+  flights, all 19 features). Recomputing stats on the training split is
+  anti-pattern 11 in a different coat.
+- A checkpoint picked by best *test* score is test-set leakage. Model
+  selection uses val; test is read once, by task 4.
+- One mission (`square_circuit`) only — every number here is in-distribution
+  on trajectory. M11 measures the rest.
+
 
 ---
 
@@ -2496,7 +2745,7 @@ Update this as milestones complete.
 | M4 | **Done** | 2026-09-22 | **Rescoped 2026-09-21 (D12)**: a parallel *evaluation* farm, not a training farm. Gates M6 and M10; the M9 gate moved to M3b. `EpisodeRunner`, `WorkerSupervisor`, `SimFarm` built and verified against 2 real concurrent workers. Tasks 1-5 closed 2026-09-21: structured failure handling (`sim_fault`, invalid-record synthesis, restart-rate abort), the run manifest, and `SimFarm.run()`'s `on_result`/`on_restart` progress callbacks. **Task 6 (throughput sweep) ran for real**, full 16-configuration sweep; chosen operating point **2 workers** (task 8, CPU affinity, done-as-not-needed from that sweep's real CPU numbers, which never saturate). **Task 7 (soak test) passed for real 2026-09-22** — 400/400 episodes at 2 workers × 200 × 1x speed, 0 restarts, 0 orphans, flat memory, ~3h unattended — after a five-step real investigation: the milestone's literal 4-workers spec genuinely failed from real DDS/rclpy instability and was rescoped to 2 (task 6's own recommendation); a genuine bug (a reset writes no heartbeat while running, letting the health check falsely restart a worker mid-reset) was found and fixed in `EpisodeRunner.run_episode()`; task 6's own "4x speed" recommendation was found, at soak scale, to be wrong in a way the sweep's short 3-episode sample couldn't see (64% of episodes silently timed out instead of completing) and was corrected back to 1x; and `restart_budget_per_worker` was raised 5→20 in `configs/env/farm.yaml`, an evidence-based recalibration from two runs' measured restart rate, not a tuned-to-pass hack. Full story: `docs/throughput.md` and `tests/slow/test_soak.py`'s module docstring. Absorbed M3's `run_episodes.py`-internal `_Worker` into `EpisodeRunner`; extracted `simulation/worker_process.py` out of `aero_bridge/reset.py`'s `hard_reset()`. Schema bumped to v2. **Real bugs found and fixed across the milestone (7 total)**: a stale heartbeat file across runs causing a spurious restart; `is_healthy()` racing a worker's own in-flight hard reset; `ensure_healthy()` leaking an untracked OS-process pair on a failed restart; `aero_bridge/reset.py`'s `REPO_DIR` breaking depending on which of three physical copies of the file got imported; a multiprocessing-queue race double-recording one episode; the heartbeat-before-reset gap; and the soak-scale-only mission-completion-quality gap in task 6's speed-factor recommendation. Only `tests/sim/test_worker_restart.py` (a real `kill -9`, task 4) remains open, deliberately deferred. |
 | M5 | **Done** | 2026-09-22 | Was M4. `configs/features.yaml` (13 shared + 6 px4_only, `feature_version` "1"), `configs/rl/observation_v1.yaml`, `configs/rl/normalization_v1.yaml`, and `ai/features/feature_extractor.py` (pure, no ROS import). Verified against a live flight as well as fixtures. Detail: M5 section above. |
 | M6 | **Done** | 2026-09-23 | Was M5. `RotorDegradationSystem` plugin (scales thrust and reaction torque together), `x500_aero` model, `RotorFaultController`, fault integration in `EpisodeRunner`/`SimFarm`, thrust cross-validation fixture, episode schema v4. **Dataset `results/m6_dataset_v1/`: 750/750 episodes, 741 valid**, 2 workers × 1×, resumed twice via `--resume` with no episodes lost. Headline finding: PX4's own `FailureDetector` stays silent in 100% of faulty episodes at severity [0.2, 0.4) and 63% at [0.8, 1.0]. Full analysis: `docs/fault_dataset.md`. |
-| M7 | Not started | | Was M6. |
+| M7 | **Done** | 2026-09-23 | Was M6. Rotor-symmetric streaming GRU, 5-member ensemble (user-chosen over a 1D-CNN). On the test flights it detects weak faults (s 0.2–0.4) in a median 0.88 s vs the random forest's 1.18 s, identifies the rotor 98.6–99.8% of the time, and estimates severity with MAE ≤ 0.022. ECE is 0.004 and uncertainty→error AUROC 0.91. Tick AUROC ties the random forest; the model loses on false alarms (6 vs 4 short events in 0.69 h). Verified live on 2 concurrent workers (right rotor, ~0.55 s delay, p99 tick ≤ 10.7 ms), after fixing a real live-latency overshoot (p99 34.5 ms → stacked-weights streaming path). `error_model.json` written for M8b. Full results: `docs/detector_results.md`. |
 | M8 | Not started | | Was M7. |
 | M8b | Not started | | **New milestone (D12)**: Isaac Lab training environment. Depends on M3b, M5, M6, M7. |
 | M9 | Not started | | Was M8. Rescoped by D12: trains in Isaac, evaluates on PX4, adds the RQ5 transfer table. |

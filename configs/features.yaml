@@ -132,5 +132,7 @@ features:
       (baseline-vs-baseline) rather than an absolute hover-thrust physics
       constant, because sensor_combined's accelerometer sign convention was
       not independently re-verified when this was written -- see
-      ai/features/feature_extractor.py. Its actual discriminative power
-      against a real injected fault is measured in M6/M7, not assumed here.
+      ai/features/feature_extractor.py. Measured in M7: on its own it does
+      not discriminate (tick AUROC 0.40 as a threshold detector,
+      docs/detector_results.md); the per-rotor motor-command imbalance is
+      the informative signal. It stays in v1 as one detector input.

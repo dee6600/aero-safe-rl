@@ -106,6 +106,27 @@ class FaultSpec:
         )
 
 
+def commanded_severity(severity: float, profile: FaultProfile | str,
+                       ramp_duration_s: float, t_since_onset_s: float) -> float:
+    """The severity commanded to the plugin `t_since_onset_s` after the
+    onset tick (the first tick whose mission-elapsed time reached
+    onset_time_s). The one definition of a fault's time profile:
+    experiments/episode_runner.py commands the plugin with it, and M7's
+    ai/detector/dataset.py labels each recorded tick with it, so a label is
+    by construction what was sent at that tick.
+
+    Negative `t_since_onset_s` (before onset) and profile NONE give 0.0.
+    STEP is the full severity from the onset tick on; RAMP rises linearly
+    from 0 at the onset tick to `severity` after `ramp_duration_s`, then
+    holds (a non-positive ramp duration degenerates to a step)."""
+    profile = FaultProfile(profile)
+    if profile == FaultProfile.NONE or t_since_onset_s < 0:
+        return 0.0
+    if profile == FaultProfile.STEP or ramp_duration_s <= 0:
+        return float(severity)
+    return float(severity) * min(1.0, t_since_onset_s / ramp_duration_s)
+
+
 _REQUIRED_TOP_FIELDS = (
     "fault_schema_version", "fault_type", "mission_id", "dataset",
     "rotor_indices", "severity_range_s", "onset_time_range_s", "profiles",

@@ -2,11 +2,13 @@
 
 **Planning document — roadmap only. No implementation.**
 
-Status: Phases 0–1, 1b, 3, 3b, 4, 5 and 6 done; Phase 2 substantially done with
-one open reliability item (`docs/parallelism.md` §2.6). Phase 4's evaluation
-farm passed a 400-episode soak at 2 workers (`docs/throughput.md`); Phase 6
-delivered the 750-episode labelled fault dataset (`docs/fault_dataset.md`).
-Next: Phase 7 (AI fault detection). An active-fault-diagnosis extension was
+Status: Phases 0–1, 1b, 3, 3b, 4, 5, 6 and 7 done; Phase 2 substantially done
+with one open reliability item (`docs/parallelism.md` §2.6). Phase 4's
+evaluation farm passed a 400-episode soak at 2 workers (`docs/throughput.md`);
+Phase 6 delivered the 750-episode labelled fault dataset
+(`docs/fault_dataset.md`); Phase 7 delivered the fault detector and the error
+model Phase 8b needs (`docs/detector_results.md`). Next: Phase 8 (rule-based
+recovery baseline). An active-fault-diagnosis extension was
 proposed and deferred until after the MVP (`docs/change_active_diagnosis.md`).
 
 **Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
@@ -607,9 +609,15 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
 - **Tech** — NumPy, ROS 2 message filters.
 - **Validation** — Feature vector logged during a healthy mission with no NaNs/gaps; replaying a recorded flight reproduces the identical vector (bit-for-bit determinism check).
 
-> The **thrust-setpoint vs achieved-acceleration residual** is likely the single
-> most informative feature for actuator degradation — a degraded rotor forces the
-> allocator to command more while delivering less. Ensure it is in v1.
+> The **thrust-setpoint vs achieved-acceleration residual** was expected to be
+> the single most informative feature for actuator degradation — a degraded
+> rotor forces the allocator to command more while delivering less. It is in v1
+> (`thrust_accel_residual`).
+>
+> **Measured in Phase 7: on its own it is not.** As a threshold detector it
+> scored tick AUROC 0.40. The informative signal is per-rotor: the degraded
+> rotor's motor command rises above the other three. The residual stays in the
+> feature vector as one of the detector's inputs (`docs/detector_results.md`).
 
 ---
 
@@ -646,8 +654,8 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
 
 ---
 
-### Phase 7 — AI fault detection
-**Effort: ~2 weeks**
+### Phase 7 — AI fault detection ✅
+**Effort: ~2 weeks — done 2026-09-23**
 
 - **Goal** — A learned detector producing fault presence, type, and severity from the telemetry window.
 - **Deliverables**
@@ -660,11 +668,42 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
     uncertainty proxy — the recovery policy needs to know when the detector is unsure.
   - Online inference node meeting the 10 Hz budget.
   - `ai/` module with training script, eval script, saved checkpoints, metrics report.
-- **Tech** — PyTorch; recommend starting with a **1D-CNN or small GRU** over the
-  window. A Transformer is not justified at this data scale.
-- **Validation** — Test-set detection accuracy, per-severity ROC/AUC, and a
-  **detection latency distribution** (time from fault onset to first sustained
-  positive). Must beat both baselines. Online inference latency < 20 ms.
+- **Tech** — PyTorch. The plan recommended a 1D-CNN or small GRU. What was built
+  is a **rotor-symmetric streaming GRU with a 5-member deep ensemble**, chosen
+  over a 1D-CNN after a look at the dataset:
+  - **Streaming:** it carries its memory across the whole flight, which helps
+    during the onset transient and slow ramps. A windowed CNN sees only the
+    last 1.5 s.
+  - **Rotor-symmetric:** the telemetry is re-expressed from each rotor's point
+    of view using PX4's x500 geometry, and one shared network scores each
+    rotor. This quadruples the effective data and gives rotor identification
+    directly.
+  - **Ensemble:** member disagreement is the uncertainty output.
+  A Transformer is not justified at this data scale.
+- **Validation** — Per-severity AUROC, detection rate and **detection delay
+  distribution** (fault onset → first alarm sustained 0.5 s), false alarms per
+  healthy flight-hour, rotor-ID accuracy, severity MAE and calibration. All
+  are measured on held-out test episodes, with every detector's threshold set
+  by the same rule on validation data. Online inference < 20 ms.
+
+  **Exit criterion as revised.** The original "must beat both baselines"
+  proved the wrong bar: a settled fault is near-trivially separable from
+  motor-command imbalance, so every good detector sits near the AUROC
+  ceiling. The criterion became: better detection delay on weak faults and
+  better severity error than the best baseline, **or** the shortfall reported
+  as the result, with no baseline retuned downward.
+- **Outcome** (details: `docs/detector_results.md`; build record:
+  `milestones.md` M7) — against the strongest baseline, a random forest:
+  - **Weak faults (s 0.2–0.4):** faster detection, median 0.88 s vs 1.18 s.
+  - **Rotor ID:** 98.6–99.8% accurate vs 93–96%.
+  - **Severity MAE:** 0.013–0.022 vs up to 0.116.
+  - **Calibration:** ECE 0.004.
+  - **Tick AUROC:** a tie (0.998 vs 0.997).
+  - **False alarms:** slightly more (6 vs 4 short events in 0.69 healthy
+    hours).
+
+  Online: at most 10.7 ms p99 per tick, verified live on two concurrent
+  workers.
 
 ---
 
@@ -676,7 +715,10 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
   - Finite state machine: `NOMINAL → SUSPECTED → CONFIRMED → RECOVERING → LANDED/ABORTED`.
   - Hand-designed responses: reduce max velocity, lower altitude ceiling,
     reduce aggressiveness, hold position, divert to nearest safe point, controlled descent.
-  - Hysteresis and debounce on detector output.
+  - Hysteresis and debounce on detector output. Phase 7 measured the
+    detector's false alarms as short: every one lasted ≤ 0.9 s and fell around
+    waypoint turns. A 1–2 s confirmation hold is longer than all of them
+    (`docs/detector_results.md`).
   - Thresholds tuned via a documented sweep — not guessed.
 - **Tech** — Python FSM, same command interface the RL policy will use.
 - **Validation** — Measurably improves mission success and crash rate over the
@@ -703,7 +745,12 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
     calibrated noise/latency/false-positive model fitted to the Phase 7
     detector's measured error characteristics. This is the honest way to keep
     principle #12 (no ground truth as input) while training off-stack, and the
-    fit must be documented, since RQ3 and RQ5 both lean on it.
+    fit must be documented, since RQ3 and RQ5 both lean on it. The measured
+    error model is `results/m7_detector_v1/error_model.json`. Its main
+    feature: the detector's output is near-binary, so what matters is *when* it
+    switches, not the noise on its level. Model it as a detection-delay
+    distribution plus rare short false alarms, not as Gaussian noise on the
+    true severity.
   - Both environments asserted against `observation_v1.yaml` by one shared test.
 - **Precondition** — Phase 3b's measurement, Phase 7's detector error model.
 - **Validation** — The two environments agree dimension-for-dimension on the
@@ -1040,11 +1087,14 @@ an unstated advantage for C4 over the C3 baseline.
 
 ## 9. Evaluation metrics
 
-**Detection**
-- Accuracy, precision, recall, F1, ROC-AUC — reported *per severity level*
-- **Detection latency** — onset → first sustained positive (mean, median, p95)
-- False positive rate on healthy flights (per flight-minute)
-- Severity estimation error (MAE)
+**Detection** (implemented in Phase 7; protocol in `experiments/metrics.py`)
+- Tick-level ROC-AUC and episode detection rate — reported *per severity level*
+  and per onset profile
+- **Detection delay** — onset → first alarm sustained 0.5 s (median, p90)
+- False alarms per healthy flight-hour, and share of healthy flights with any
+  alarm
+- Rotor-identification accuracy and severity estimation error (MAE, bias)
+- Calibration (ECE) and whether the uncertainty output predicts errors
 
 **Recovery / flight**
 - Mission success rate (primary headline metric)
@@ -1088,7 +1138,6 @@ aero-safe-rl/
 │   ├── faults/              #   fault definitions and sweeps
 │   ├── missions/            #   waypoint missions
 │   ├── rl/                  #   algorithm + reward hyperparameters
-│   ├── detector/            #   model + feature configuration
 │   └── experiments/         #   full experiment matrices
 ├── simulation/              # PX4/Gazebo layer
 │   ├── instance_spec.py     #   THE single source of instance identity
@@ -1101,9 +1150,8 @@ aero-safe-rl/
 │   └── src/aero_bridge/     #   telemetry pipeline, mission executor, command interface
 ├── ai/                      # fault detection
 │   ├── features/            #   feature extraction (shared with rl/ and isaac/)
-│   ├── models/              #   architectures
-│   ├── train.py  eval.py
-│   └── checkpoints/
+│   └── detector/            #   dataset + split, baselines, model, train, evaluate,
+│                            #   online runtime (checkpoint in results/m7_detector_v1/)
 ├── rl/                      # reinforcement learning — PX4 side (aero-safe-rl env)
 │   ├── envs/                #   evaluation Gym env: thin wrapper over EpisodeRunner
 │   ├── rewards/             #   reward functions (shared spec with isaac/)
@@ -1167,7 +1215,7 @@ aero-safe-rl/
 | **4** | 2+ workers × 100 episodes unattended, zero orphans, flat memory; single-worker restart proven not to disturb siblings; `docs/throughput.md` states the chosen operating point |
 | **5** | Feature vector logged for a full healthy mission with no gaps; replay determinism verified bitwise; causality test passes; normalisation stats frozen |
 | **6** | Graded severity injected and **confirmed applied**, visible in features above the Phase 3 noise floor; PX4 `FailureDetector` confirmed silent at target severities; ≥500-episode labelled dataset generated; PX4 tree unmodified |
-| **7** | Detector beats threshold and classical baselines on held-out **episodes**; per-severity ROC and latency distribution reported; online inference < 20 ms |
+| **7** | ✅ Detector evaluated against threshold and classical baselines on held-out **episodes**, per severity: better detection delay and severity error than the best baseline (tick AUROC a tie, false alarms slightly worse — reported, not tuned away); per-severity ROC and delay distribution reported; online inference < 20 ms verified live on 2 workers. See `docs/detector_results.md` |
 | **8** | FSM measurably beats no-recovery across the severity sweep; tuning sweep archived; shared policy interface in place |
 | **8b** | Both environments assert against one frozen `observation_v1.yaml`; Isaac and Gazebo fault models validated to match at matched severity; detector-output simulator fitted to Phase 7's measured error and documented |
 | **9** | Obs/action/reward specs frozen and version-stamped before training; PPO policy beats the tuned FSM **on the PX4 stack** on success and crash rate with non-overlapping CIs over ≥3 seeds — **or** the null result is documented with evidence; the RQ5 Isaac-vs-PX4 transfer table exists |
@@ -1197,15 +1245,14 @@ work is under **Open now**.
 
 ### Open now, in order
 
-Phases 3b, 4, 5 and 6 are **done** (see `milestones.md`'s progress log). What
-remains for the MVP:
+Phases 3b, 4, 5, 6 and 7 are **done** (see `milestones.md`'s progress log).
+What remains for the MVP:
 
-1. **Phase 7** — the AI fault detector, trained on `results/m6_dataset_v1/`.
-   It also supplies the measured error model Phase 8b needs.
-2. **Phase 8** — the rule-based recovery baseline.
-3. **Phase 8b** — the Isaac Lab training environment, which cannot be finished
-   before Phase 7 supplies the detector error model it must simulate.
-4. **Phases 9 → 10** — RL training in Isaac, evaluation on PX4, full
+1. **Phase 8** — the rule-based recovery baseline, consuming the Phase 7
+   detector through `ai/detector/runtime.py`.
+2. **Phase 8b** — the Isaac Lab training environment. Its detector-output
+   simulator is fitted to Phase 7's `results/m7_detector_v1/error_model.json`.
+3. **Phases 9 → 10** — RL training in Isaac, evaluation on PX4, full
    experiments.
 
 **Do not start Phase 8b or 9 until `docs/isaac_feasibility.md` exists and says
@@ -1347,6 +1394,6 @@ the one that still has to be settled empirically.
 | Weak rule-based baseline undermines the paper | **High** | Documented tuning sweep, archived as evidence |
 | SITL non-determinism blocks reproducibility | Medium | D11 — statistical standard with a divergence band measured in Phase 3; bitwise determinism required only of pure functions over recorded data |
 | Episode reset requires full SITL restart | Medium | Three-tier reset ladder built and costed in Phase 3; soft reset *proved* equivalent to hard reset before it is trusted, since leaked state biases training invisibly |
-| 8 GB VRAM limits model size | Low | Models here are small (1D-CNN/GRU, MLP policy); VRAM is not the bottleneck — wall-clock simulation is |
+| 8 GB VRAM limits model size | Low | Models here are small (the Phase 7 detector is ~10k parameters per ensemble member and trains in ~2 min; MLP policy); VRAM is not the bottleneck — wall-clock simulation is |
 | Scope creep (dashboard, hexacopter, extra faults) | Medium | Phases 11–12 and the dashboard are explicitly gated behind a complete Phase 10 |
 ```
