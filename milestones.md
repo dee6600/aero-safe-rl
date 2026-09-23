@@ -5,7 +5,7 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1, M1b, M3 and M5 done. M4 substantially done
+Status: M0 (incl. addendum), M1, M1b, M3, M5 and M6 done. M4 substantially done
 (one deferred sim-marked test, `tests/sim/test_worker_restart.py`, still
 open — see M4). M2 substantially done —
 both known multi-instance bugs fixed and verified; a third, subtler bug
@@ -1737,7 +1737,42 @@ import rclpy anywhere under ai/.
 
 ---
 
-# M6 — Fault injection and dataset
+# M6 — Fault injection and dataset ✅
+
+**M6 complete (2026-09-23).** All 11 tasks done, verified live end to end:
+the `RotorDegradationSystem` relay plugin, the `x500_aero` model, the Python
+`RotorFaultController`, `EpisodeRunner`/`SimFarm` fault integration
+(including surviving a hard reset), the cross-validation thrust fixture, and
+a real, complete **750/750-episode labelled dataset**
+(`run_id=m6_dataset_v1`, `docs/fault_dataset.md`). PX4 tree confirmed
+untouched throughout.
+
+Three real, load-bearing corrections found live, not anticipated by the
+plan: (1) `px4-rc.gzsim` does not spawn via a generic `model://` resolution
+as originally assumed — it hardcodes a path under PX4's own models
+directory, requiring the launcher to spawn project-local models itself
+(task 4); (2) the apt-installed `python3-gz-msgs10` Python bindings do not
+expose `gz.msgs.Param`'s map field as a Python dict (task 3); (3) two
+Python-side bugs (`run_episodes.py`/`SimFarm` not threading `--model`
+through) silently broke soft reset for any non-default model. All three are
+documented in place, at the task where they were found, rather than
+silently fixed.
+
+**A real, unplanned sub-feature was built mid-milestone**: resume support
+(`SimFarm(resume=True)`, `generate_fault_dataset.py --resume`) — the actual
+750-episode run was interrupted twice by genuine external events (a full
+disk; a Claude Code session ending mid-run, which killed the untracked
+top-level process even though its `setsid`-launched simulator children
+survived) and resumed both times with zero episodes lost or re-flown. This
+was not in the original task plan; it became necessary live and is now a
+reusable capability for any future long dataset-generation run.
+
+**The actual research finding this milestone exists to produce**: PX4's own
+`FailureDetector` is not uniformly blind across the targeted severity range
+— silent 100% of the time at `[0.2, 0.4)`, only 63.3% silent at `[0.8,
+1.0]`, a clean monotonic trend. See `docs/fault_dataset.md` for the full
+breakdown; this is real signal for how M7/M10 should frame the detection
+problem, not noise to average away.
 
 **Goal:** inject a rotor fault of chosen strength at a chosen moment, repeatably,
 and produce the labelled dataset the detector trains on. The hardest engineering
@@ -2047,12 +2082,28 @@ episode dataset run is soak-scale, so it uses the soak-validated point.
    PX4's own `FailureDetector` was **not** silent — exactly the kind of
    real finding task 10's full run needs to characterize per severity, not
    something to paper over even in this small a sample.
-10. 🔄 **Real dataset generation run — in progress.** 2 workers, 1x speed,
-    `x500_aero`, 750 episodes (`run_id=m6_dataset_v1`). `experiments/
+10. ✅ **Real dataset generation run — complete: 750/750 episodes.** 2
+    workers, 1x speed, `x500_aero`, `run_id=m6_dataset_v1`. `experiments/
     analysis/fault_dataset_report.py` (new) reads the run back and prints
     confirmation rate / FailureDetector-silence rate overall, per severity
-    bucket, per profile, and per rotor -- `docs/fault_dataset.md` gets
-    written from its real output once the run finishes.
+    bucket, per profile, and per rotor -- `docs/fault_dataset.md` (new)
+    written from its real output.
+
+    **The actual research-premise check, and it's a nuanced real finding,
+    not a clean yes.** PX4's own `FailureDetector` stays silent 100% of the
+    time at severity `[0.2, 0.4)`, but only 63.3% of the time at `[0.8,
+    1.0]` -- a clean, monotonic trend across all four severity buckets. The
+    "PX4 doesn't notice" premise holds cleanly at the low end of
+    `severity_range_s` and progressively breaks down toward the high end;
+    documented honestly in `docs/fault_dataset.md` rather than rounded off,
+    since it directly matters for how M7/M10 frame the detection problem's
+    difficulty across the severity range. 741/750 episodes valid (98.8%);
+    597 faulty / 153 healthy (20.4% -- matches the configured 20%
+    `healthy_fraction` exactly); overall fault confirmation rate 77.9%,
+    with the 22.1% unconfirmed traced almost entirely (125/132) to missions
+    that `completed` before their sampled onset time was ever reached -- the
+    same real, understood edge case task 9's small run first surfaced, now
+    confirmed and quantified at full scale, not a defect.
 
     **Real interruption and resume, live, not hypothetical.** The machine's
     disk filled to ~500MB free mid-run (unrelated to this run's own small
@@ -2086,9 +2137,18 @@ episode dataset run is soak-scale, so it uses the soak-validated point.
     4 new tests in `tests/test_sim_farm_assignment.py`, all passing.
     Verified live: `--resume` picked up at `worker 0 ep_0064` (immediately
     after the last episode on disk, `ep_0063`), not `ep_0000`.
-11. ⬜ **PX4 tree cleanliness + wrap-up.** `git -C ~/projects/PX4-Autopilot
-    status --porcelain` empty; `milestones.md` progress log/checkboxes
-    updated.
+11. ✅ **PX4 tree cleanliness + wrap-up.** `git -C ~/projects/PX4-Autopilot
+    status --porcelain` shows only the same 5 pre-existing untracked
+    submodule-clutter directories present before this milestone started
+    (`boards/modalai/voxl2/src/lib/`, `src/lib/rl_tools/`,
+    `src/modules/mc_raptor/`, `src/modules/simulation/gz_plugins/
+    optical_flow/PX4-OpticalFlow/`, `src/modules/uxrce_dds_client/
+    Micro-XRCE-DDS-Client-v3/`) — zero modifications to any tracked file,
+    zero new patches, still pinned to `v1.17.0` on branch `aero-safe-rl`.
+    Confirms the design's central claim: the entire fault-injection
+    mechanism (plugin, model, spawn path, airframe reuse) needed no PX4
+    tree changes at all, despite two real corrections along the way to how
+    that was achieved (tasks 3-4's design note above).
 
 ### Files created
 
@@ -2104,11 +2164,16 @@ simulation/models/x500_aero/model.sdf
 simulation/rotor_fault.py
 scripts/measure_rotor_fault_thrust.py
 tests/fixtures/rotor_fault_thrust_curve.json
+experiments/analysis/fault_dataset_report.py
 docs/fault_dataset.md
 configs/schema/episode_record.yaml             (v3 -> v4)
 experiments/episode_schema.py                  (SCHEMA_VERSION bump)
 experiments/episode_runner.py                  (fault_spec integration)
-experiments/sim_farm.py                        (fault_specs threading)
+experiments/sim_farm.py                        (fault_specs threading, resume=True)
+experiments/run_episodes.py                    (--model threading)
+simulation/instance_spec.py                    (_AUTOSTART_OVERRIDE_FOR_MODEL,
+                                                 gz_spawn_request())
+scripts/sim_start.sh                           (project-local model spawn path)
 ros2_ws/src/aero_bridge/aero_bridge/mission_executor.py   (record_step)
 ```
 
@@ -2121,6 +2186,8 @@ tests/test_episode_schema.py                   (extended — v4)
 tests/test_mission_executor.py                 (extended)
 tests/test_episode_runner.py                   (extended — fault_spec)
 tests/test_fault_fields_not_in_observation.py
+tests/test_instance_spec.py                    (extended — model spawn/autostart)
+tests/test_sim_farm_assignment.py              (extended — fault_specs, resume)
 tests/sim/test_rotor_fault_plugin_loads.py
 tests/sim/test_x500_aero_model_loads.py
 tests/sim/test_rotor_fault_controller.py
