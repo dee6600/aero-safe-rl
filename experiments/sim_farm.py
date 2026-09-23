@@ -106,7 +106,8 @@ def _worker_main(spec: InstanceSpec, mission_id: str, mission: dict, mission_dig
                   env_versions_json: str, n_episodes: int, start_index: int, seed_base: int,
                   reset_tier: str, run_id: str, results_dir: str, sim_run_dir: str,
                   result_queue, enable_rotor_fault: bool = False,
-                  fault_specs: Optional[list] = None, fault_config_digest: str = "none") -> None:
+                  fault_specs: Optional[list] = None, fault_config_digest: str = "none",
+                  recovery=None) -> None:
     """Picklable entry point for one worker's child process (spawn start
     method). Flies `n_episodes` episodes starting at global episode index
     `start_index` (NOT always 0 -- a worker respawned after a restart must
@@ -140,7 +141,7 @@ def _worker_main(spec: InstanceSpec, mission_id: str, mission: dict, mission_dig
         runner = EpisodeRunner(spec, run_id=run_id, mission_id=mission_id, mission=mission,
                                 mission_digest=mission_digest, env_versions_json=env_versions_json,
                                 results_dir=results_dir, feature_version=FEATURE_VERSION_UNSET,
-                                enable_rotor_fault=enable_rotor_fault)
+                                enable_rotor_fault=enable_rotor_fault, recovery=recovery)
 
         def heartbeat_on_step(row):
             write_heartbeat(spec.instance, sim_run_dir, last_odometry_wall_s=row["t_wall_utc"])
@@ -195,6 +196,7 @@ class SimFarm:
                  enable_rotor_fault: bool = False,
                  fault_specs_by_worker: Optional[list] = None,
                  fault_config_digest: str = "none",
+                 recovery=None,
                  run_id: Optional[str] = None, resume: bool = False,
                  results_dir: str = "results", sim_run_dir: str = DEFAULT_RUN_DIR,
                  heartbeat_stall_timeout_s: float = 45.0, restart_budget_per_worker: int = 20,
@@ -231,6 +233,10 @@ class SimFarm:
         self.reset_tier = reset_tier
         self.enable_rotor_fault = enable_rotor_fault
         self.fault_config_digest = fault_config_digest
+        # M8: which recovery policy/detector every worker flies (picklable;
+        # each worker builds its own from it). Default: no recovery.
+        from rl.policy_driver import RecoveryConfig
+        self.recovery = recovery if recovery is not None else RecoveryConfig()
         if fault_specs_by_worker is not None:
             if len(fault_specs_by_worker) != worker_count:
                 raise ValueError(
@@ -472,7 +478,7 @@ class SimFarm:
             args=(sup.spec, self.mission_id, mission, mission_digest, env_versions_json,
                   n_episodes, start_index, self.seed_base, self.reset_tier, self.run_id,
                   self.results_dir, self.sim_run_dir, self._result_queue,
-                  self.enable_rotor_fault, fault_specs, self.fault_config_digest),
+                  self.enable_rotor_fault, fault_specs, self.fault_config_digest, self.recovery),
             daemon=True,
         )
         proc.start()
@@ -530,6 +536,7 @@ class SimFarm:
             fault_confirmed_applied=False,
             fault_confirmed_severity_final=0.0,
             px4_failure_detector_silent=True,
+            **self.recovery.provenance(),
         )
         EpisodeLogger(self.run_id, worker_id=instance, results_dir=self.results_dir).write_episode(record)
         # Always newly-recorded in practice (the completed-quota guard above

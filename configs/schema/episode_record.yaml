@@ -26,8 +26,16 @@
 # side: shared entry in configs/features.yaml. fault_type/fault_profile
 # mirror experiments/fault_schedule.py's FaultType/FaultProfile enums
 # exactly (one definition, imported by episode_schema.py -- not redefined).
+#
+# v5 (M8 task 2) added recovery: two termination reasons (ground_contact,
+# recovery_landed), the policy that flew the episode and the digests of the
+# specs/checkpoint it ran under, and per step the flight phase, the action
+# in force, the policy's state and the detector's output. Every flight now
+# goes through a policy (NominalPolicy = no recovery), so these fields are
+# always real values; the detector fields are NaN / -1 / false when no
+# detector ran.
 
-schema_version: "4"
+schema_version: "5"
 
 # Closed enum for the fault (if any) commanded during an episode. "none" is
 # the healthy case. v1 implements exactly one non-none fault type
@@ -63,6 +71,8 @@ termination_reasons:
   - worker_restarted            # supervisor detected a dead PID/stalled telemetry and restarted the worker mid-episode
   - sim_fault                    # position or velocity reported a non-finite value -- the simulation itself broke
   - aborted_error                 # an exception outside the typed flight-sequence errors
+  - ground_contact                 # v5: reached the ground without a commanded landing (a fall, or an uncommanded sink)
+  - recovery_landed                 # v5: the policy committed to land and the vehicle is down
 
 # Closed enum for the tier of reset applied before this episode's flight.
 # "none" is the one legitimate value for the first episode flown on a
@@ -112,6 +122,10 @@ episode_fields:
     - fault_confirmed_applied
     - fault_confirmed_severity_final
     - px4_failure_detector_silent
+    - policy_name
+    - policy_config_digest
+    - action_spec_digest
+    - detector_checkpoint_digest
 
 # One row per control-loop tick during the flight (CONTROL_RATE_HZ in
 # mission_executor.py), written by the same episode's logger before the
@@ -152,3 +166,13 @@ step_fields:
     - motor_2_output
     - motor_3_output
     - px4_failure_detector_status
+    - flight_phase
+    - policy_state
+    - action_speed_scale
+    - action_altitude_offset_m
+    - action_land
+    - det_p_fault
+    - det_rotor
+    - det_severity
+    - det_uncertainty
+    - det_alarm

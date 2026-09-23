@@ -53,6 +53,14 @@ def test_escalation_is_independent_of_requested_tier():
     assert next_reset_tier("medium", "hold_timeout") == "hard"
 
 
+def _fake_driver():
+    """Stands in for rl.policy_driver.PolicyDriver: EpisodeRunner only reads
+    its provenance and hands it to fly_mission (faked here)."""
+    return types.SimpleNamespace(provenance=dict(
+        policy_name="nominal", policy_config_digest="none", action_spec_digest="x",
+        detector_checkpoint_digest="none"))
+
+
 def test_run_episode_writes_a_heartbeat_before_starting_a_reset(monkeypatch):
     """Found live (M4 task 7's soak test): a reset writes no heartbeat while
     it runs (heartbeats only happen per flight control tick), so the
@@ -69,7 +77,7 @@ def test_run_episode_writes_a_heartbeat_before_starting_a_reset(monkeypatch):
         calls.append("hard_reset")
         return types.SimpleNamespace(tier="hard", wall_duration_s=1.0)
 
-    def fake_fly_mission(node, px4, clock, mission, on_step=None):
+    def fake_fly_mission(node, px4, clock, mission, on_step=None, driver=None):
         calls.append("fly_mission")
         return types.SimpleNamespace(
             termination_reason="completed", n_steps=0, waypoints_reached=0,
@@ -92,6 +100,7 @@ def test_run_episode_writes_a_heartbeat_before_starting_a_reset(monkeypatch):
     runner.node = object()
     runner.px4 = object()
     runner.clock = object()
+    runner.driver = _fake_driver()
     runner.rebuild_after_hard_reset = lambda: calls.append("rebuild")
     runner.logger = types.SimpleNamespace(log_step=lambda *a, **k: None,
                                            write_episode=lambda *a, **k: None)
@@ -138,7 +147,7 @@ def _fake_runner(monkeypatch, *, fly_ticks: list[float]):
     RotorFaultController, and a fake fly_mission that calls on_step once per
     t_sim_s in `fly_ticks` before returning a minimal completed result."""
 
-    def fake_fly_mission(node, px4, clock, mission, on_step=None):
+    def fake_fly_mission(node, px4, clock, mission, on_step=None, driver=None):
         for t in fly_ticks:
             on_step({"t_sim_s": t, "px4_failure_detector_status": 0})
         return types.SimpleNamespace(
@@ -165,6 +174,7 @@ def _fake_runner(monkeypatch, *, fly_ticks: list[float]):
     runner.node = object()
     runner.px4 = object()
     runner.clock = object()
+    runner.driver = _fake_driver()
     runner.logger = types.SimpleNamespace(log_step=lambda *a, **k: None,
                                            write_episode=lambda *a, **k: None)
     return runner

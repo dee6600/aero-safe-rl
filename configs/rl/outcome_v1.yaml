@@ -1,0 +1,30 @@
+# How an episode's outcome is judged (M8 task 2). Frozen before any tuning
+# run, so the FSM sweep, M9's reward and M10's tables all score flights by the
+# same rule. M8b's Isaac env must use these numbers for its own outcome.
+#
+# Read by rl/policies/base_policy.py:load_outcome_spec(). Used online by
+# mission_executor.fly_mission (ending a flight on an uncommanded ground
+# contact) and offline by experiments/metrics.py:classify_outcome().
+
+outcome_version: "1"
+
+# The vehicle counts as on the ground below this altitude above the spawn
+# point...
+ground_contact_alt_m: 0.3
+# ...but only after it has once been above this one, so the takeoff roll
+# never counts as a contact.
+airborne_alt_m: 1.0
+
+# Crash if the vertical speed at first ground contact exceeds this (user
+# decision 2026-09-23: typical small-UAV landing-gear tolerance) ...
+crash_touchdown_speed_m_s: 2.0
+# ...or if roll/pitch tilt ever exceeds this while airborne. Healthy M6
+# flights peak at ~44 deg (PX4's 45 deg tilt cap).
+crash_tilt_deg: 60.0
+# Reported alongside the main result, never used to choose anything.
+sensitivity_touchdown_speeds_m_s: [1.5, 2.5]
+
+# A commanded landing counts as landed once the vehicle has been on the
+# ground this long, even if PX4 has not disarmed (a vehicle on its side may
+# never trigger PX4's land detector). PX4's own COM_DISARM_LAND is 2 s.
+landed_settle_s: 2.0

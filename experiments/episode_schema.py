@@ -32,7 +32,7 @@ import yaml
 from experiments.fault_schedule import FaultProfile, FaultType
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "configs" / "schema" / "episode_record.yaml"
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 # configs/features.yaml now defines a real feature_version ("1", as of M5),
 # but no writer in this repo computes and tags actual feature vectors yet --
@@ -49,7 +49,8 @@ class TerminationReason(str, enum.Enum):
 
     WORKER_RESTARTED and OFFBOARD_LOST were added in schema v2 (M4 tasks
     1-3); SIM_FAULT was added in M4 task 4 -- see
-    configs/schema/episode_record.yaml's module comment."""
+    configs/schema/episode_record.yaml's module comment. GROUND_CONTACT and
+    RECOVERY_LANDED were added in schema v5 (M8 task 2)."""
     COMPLETED = "completed"
     PREFLIGHT_FAILED = "preflight_failed"
     ARM_TIMEOUT = "arm_timeout"
@@ -61,6 +62,8 @@ class TerminationReason(str, enum.Enum):
     WORKER_RESTARTED = "worker_restarted"
     SIM_FAULT = "sim_fault"
     ABORTED_ERROR = "aborted_error"
+    GROUND_CONTACT = "ground_contact"
+    RECOVERY_LANDED = "recovery_landed"
 
 
 class ResetTier(str, enum.Enum):

@@ -6,6 +6,13 @@ source, CLAUDE.md D10); this file adds no new low-level flight primitive of
 its own, only the waypoint sequencing and per-step measurement on top of
 them.
 
+Since M8 the waypoint sequencing itself lives in rl/mission_tracker.py
+(MissionTracker, a pure object), and every flight runs under a recovery
+policy through rl/policy_driver.py (NominalPolicy = no recovery). This file
+streams the tracker's setpoint, records steps, and decides how the flight
+ends -- including an uncommanded ground contact, which before M8 went
+unnoticed until a waypoint's wall-clock watchdog ran out.
+
 Missions are plain dicts loaded from configs/missions/*.yaml -- see
 load_mission()/validate_mission_config(). Waypoints, acceptance radius, hold
 times, geofence and the sim-time timeout all live in that file, not in code
@@ -46,17 +53,20 @@ from aero_bridge.arming_sequence import (
 from aero_bridge.px4_clock import PX4Clock
 from aero_bridge.px4_interface import PX4Interface
 from experiments.episode_schema import TerminationReason
+from rl.mission_tracker import MissionTracker
+from rl.policies.base_policy import NominalPolicy, load_outcome_spec
+from rl.policy_driver import PolicyDriver
 
 CONTROL_RATE_HZ = 10.0  # per-step record rate; independent of the setpoint stream rate
 CONTROL_PERIOD_S = 1.0 / CONTROL_RATE_HZ
 
-# A single stuck waypoint/hover's wall-clock hang watchdog (arming_sequence's
-# hold_position_until timeout_s). Deliberately NOT the mission's own
-# timeout_s: that field is a sim-time budget for the whole mission, checked
-# separately below by check_mission_deadline() on every poll, and reusing it
-# here would make a single stuck step wait the entire mission budget before
-# failing.
-WAYPOINT_WALL_WATCHDOG_S = 60.0
+# The whole mission's wall-clock hang watchdog, as a multiple of its sim-time
+# budget (timeout_s). The sim-time budget itself is checked separately by
+# check_mission_deadline() on every poll; this only catches a simulator whose
+# clock has stopped, so it is generous enough for a slow 1x run. (Before M8
+# each waypoint had its own 60 s watchdog, and a crashed vehicle sat out that
+# minute before ending as hold_timeout; a crash now ends at ground contact.)
+MISSION_WALL_WATCHDOG_FACTOR = 3.0
 
 
 class MissionConfigError(ValueError):
@@ -79,6 +89,17 @@ class SimFault(FlightSequenceError):
     (Gazebo/PX4 diverged into a physically meaningless state), so the
     episode is invalidated rather than treated as an ordinary unsuccessful
     flight."""
+
+
+class GroundContact(FlightSequenceError):
+    """The vehicle reached the ground (configs/rl/outcome_v1.yaml) without a
+    commanded landing -- a fall, or a sink the policy did not command.
+    Whether it was a crash is decided offline from the touchdown speed and
+    tilt (experiments.metrics.classify_outcome), not here."""
+
+
+class _Settled(Exception):
+    """Internal: a commanded landing has sat on the ground long enough."""
 
 
 def _is_finite_state(px: float, py: float, pz: float,
@@ -123,6 +144,7 @@ _REASON_FOR_ERROR: dict[type, TerminationReason] = {
     LandTimeout: TerminationReason.LAND_TIMEOUT,
     MissionTimeout: TerminationReason.EPISODE_TIMEOUT,
     SimFault: TerminationReason.SIM_FAULT,
+    GroundContact: TerminationReason.GROUND_CONTACT,
 }
 
 
@@ -181,8 +203,18 @@ class MissionResult:
 
 
 def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any],
-                 on_step: Optional[Callable[[dict], None]] = None) -> MissionResult:
-    """Flies `mission` (as returned by load_mission()) to completion.
+                 on_step: Optional[Callable[[dict], None]] = None,
+                 driver: Optional[PolicyDriver] = None) -> MissionResult:
+    """Flies `mission` (as returned by load_mission()) to completion, under
+    the recovery policy in `driver` (default: NominalPolicy, no detector --
+    today's flight, milestones.md M8 "Design").
+
+    The setpoint comes from a MissionTracker, advanced on every 10 Hz step
+    record under the driver's current action. The flight ends when the
+    mission is done (land -> COMPLETED), when the policy commits to land
+    (land -> RECOVERY_LANDED), or on an uncommanded ground contact
+    (GROUND_CONTACT, configs/rl/outcome_v1.yaml). Steps are recorded through
+    touchdown in both landings, because the crash rule is judged there.
 
     `on_step` is called once per control tick with a step-record dict as
     soon as it is built -- the caller (EpisodeLogger, or a test) decides
@@ -198,17 +230,15 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
     an episode that ended badly is a real, recordable measurement, not a
     reason to crash the run.
     """
-    takeoff_z = -abs(mission["altitude_m"])
-    accept_r = mission["acceptance_radius_m"]
-    hold_s = mission["hold_time_s"]
-    final_hover_s = mission["final_hover_s"]
+    driver = driver if driver is not None else PolicyDriver(NominalPolicy())
+    driver.reset()
+    outcome_spec = load_outcome_spec()
     timeout_s = mission["timeout_s"]
-    waypoints = mission["waypoints"]
 
     steps: list[dict] = []
     errors: list[float] = []
-    waypoints_reached = 0
-    state = {"step_index": 0, "t_sim_start_s": None}
+    state = {"step_index": 0, "t_sim_start_s": None, "tracker": None,
+             "airborne": False, "contact_since": None}
 
     def check_mission_deadline() -> None:
         if state["t_sim_start_s"] is None:
@@ -220,21 +250,33 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
         if elapsed > timeout_s:
             raise MissionTimeout(f"mission exceeded its {timeout_s}s sim-time budget")
 
-    def record_step(target: tuple[float, float, float]) -> None:
+    def record_step(phase: str) -> Optional[dict]:
+        """Builds, annotates (via the driver) and emits one step record.
+        Returns None, recording nothing, when telemetry or the sim clock is
+        not available this tick."""
         odom = px4.latest['vehicle_odometry']
         status = px4.latest['vehicle_status']
         attitude = px4.latest['vehicle_attitude']
         sensors = px4.latest['sensor_combined']
         motors = px4.latest['actuator_motors']
-        if odom is None or status is None or attitude is None or sensors is None:
-            return
+        now_us = clock.now_us()
+        if odom is None or status is None or attitude is None or sensors is None or now_us is None:
+            # A missing sim-clock read is skipped rather than stamped t=0:
+            # the detector's and policy's feature windows reject time going
+            # backwards (M8).
+            return None
         battery = px4.latest['battery_status']
+        tracker: MissionTracker = state["tracker"]
+        target = tracker.target
         px, py, pz = odom.position[0], odom.position[1], odom.position[2]
         vx, vy, vz = odom.velocity[0], odom.velocity[1], odom.velocity[2]
         if not _is_finite_state(px, py, pz, vx, vy, vz):
             raise SimFault(f"non-finite vehicle state: pos=({px},{py},{pz}) vel=({vx},{vy},{vz})")
         err = math.dist((px, py, pz), target)
-        errors.append(err)
+        if phase == "mission":
+            # Mission-phase only, as before M8 recorded landings at all --
+            # keeps position_rmse_m comparable with M3/M6.
+            errors.append(err)
         roll, pitch, yaw = _quaternion_to_euler(tuple(attitude.q))
         # actuator_motors.control has up to 12 entries; this project's
         # airframe (x500) uses the first 4 (schema v3 -- M5 task 2). NaN
@@ -243,9 +285,10 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
         # than papered over, since a NaN motor output IS the true value.
         motor_outputs = (
             tuple(motors.control[0:4]) if motors is not None else (float('nan'),) * 4)
+        t_sim_s = now_us / 1e6
         row = dict(
             step_index=state["step_index"],
-            t_sim_s=(clock.now_us() or 0) / 1e6,
+            t_sim_s=t_sim_s,
             t_wall_utc=time.time(),
             armed=status.arming_state == VehicleStatus.ARMING_STATE_ARMED,
             nav_state=int(status.nav_state),
@@ -268,76 +311,84 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
             # set during this episode") happens at the caller, same
             # raw-telemetry-only convention M5 used for attitude/rate/accel.
             px4_failure_detector_status=int(status.failure_detector_status),
+            flight_phase=phase,
         )
+        position = (px, py, pz)
+        action = driver.step(row, tracker.progress(t_sim_s, position), decide=(phase == "mission"))
+        if phase == "mission":
+            tracker.update(t_sim_s, position, action)
         state["step_index"] += 1
         steps.append(row)
         if on_step is not None:
             on_step(row)
+        return row
 
-    def make_hold_condition(target: tuple[float, float, float], hold_duration_s: float):
-        """A reached()-and-held() condition: True once the vehicle has been
-        within acceptance_radius_m of `target` for hold_duration_s of SIM
-        time. Also records a step and checks the mission deadline on every
-        poll, so both happen at the same ~control-loop cadence as the
-        vehicle is polled -- no separate timer thread."""
-        held_since = {"t": None}
-        next_record = {"t": 0.0}
+    def ground_contact(row: dict) -> bool:
+        """True on the first tick below ground_contact_alt_m after having
+        been above airborne_alt_m (outcome_v1)."""
+        alt = -row["pos_z"]
+        if alt >= outcome_spec.airborne_alt_m:
+            state["airborne"] = True
+        return state["airborne"] and alt < outcome_spec.ground_contact_alt_m
 
-        def condition() -> bool:
-            check_mission_deadline()
-            now_us = clock.now_us()
-            now_s = (now_us or 0) / 1e6
-            if now_s >= next_record["t"]:
-                record_step(target)
-                next_record["t"] = now_s + CONTROL_PERIOD_S
+    def mission_poll() -> bool:
+        """hold_position_until's condition for the whole mission: records a
+        step every CONTROL_PERIOD_S of sim time and returns True once the
+        mission is done or the policy has committed to land."""
+        check_mission_deadline()
+        now_us = clock.now_us()
+        if now_us is not None and now_us / 1e6 >= state["next_record_s"]:
+            row = record_step("mission")
+            if row is not None:
+                state["next_record_s"] = row["t_sim_s"] + CONTROL_PERIOD_S
+                if ground_contact(row):
+                    raise GroundContact(
+                        f"uncommanded ground contact at t_sim={row['t_sim_s']:.1f}s, "
+                        f"vz={row['vel_z']:.2f} m/s")
+        return state["tracker"].done or driver.action.land
 
-            odom = px4.latest['vehicle_odometry']
-            if odom is None:
-                held_since["t"] = None
-                return False
-            within = math.dist(
-                (odom.position[0], odom.position[1], odom.position[2]), target) <= accept_r
-            if not within:
-                held_since["t"] = None
-                return False
-            if now_us is None:
-                # A transient clock read failure (clock.now_us() returning
-                # None) -- rare, and more likely under heavy multi-worker
-                # CPU contention. Don't let it corrupt the hold timer: don't
-                # start OR evaluate it on a tick with no real timestamp.
-                # Found live (M4 task 6's throughput sweep, worker_count=3):
-                # this used to set held_since["t"] = None while `within` was
-                # True, and a LATER tick with a real timestamp then computed
-                # <int> - None and crashed the whole mission with an
-                # unhandled TypeError.
-                return False
-            if held_since["t"] is None:
-                held_since["t"] = now_us
-            return (now_us - held_since["t"]) / 1e6 >= hold_duration_s
+    def landing_poll() -> None:
+        """land_and_wait's on_poll: records steps through touchdown, and ends
+        the landing once the vehicle has sat on the ground landed_settle_s
+        (a vehicle on its side may never be disarmed by PX4)."""
+        now_us = clock.now_us()
+        if now_us is None or now_us / 1e6 < state["next_record_s"]:
+            return
+        row = record_step("landing")
+        if row is None:
+            return
+        state["next_record_s"] = row["t_sim_s"] + CONTROL_PERIOD_S
+        if -row["pos_z"] < outcome_spec.ground_contact_alt_m:
+            if state["contact_since"] is None:
+                state["contact_since"] = row["t_sim_s"]
+            if row["t_sim_s"] - state["contact_since"] >= outcome_spec.landed_settle_s:
+                raise _Settled()
+        else:
+            state["contact_since"] = None
 
-        return condition
+    def land() -> None:
+        try:
+            land_and_wait(node, px4, clock, on_poll=landing_poll)
+        except _Settled:
+            pass
 
     try:
+        takeoff_z = -abs(mission["altitude_m"])
         arm_and_engage_offboard(node, px4, clock, takeoff_z=takeoff_z)
         state["t_sim_start_s"] = (clock.now_us() or 0) / 1e6
+        state["next_record_s"] = 0.0
+        odom = px4.latest['vehicle_odometry']
+        start_xy = (float(odom.position[0]), float(odom.position[1])) if odom is not None else (0.0, 0.0)
+        state["tracker"] = MissionTracker(mission, driver.spec, start_xy)
 
-        for wx, wy in waypoints:
-            target = (wx, wy, takeoff_z)
-            hold_position_until(
-                node, px4, clock, x=target[0], y=target[1], z=target[2],
-                is_reached=make_hold_condition(target, hold_s),
-                timeout_s=WAYPOINT_WALL_WATCHDOG_S,
-                description=f"reach waypoint ({wx}, {wy})")
-            waypoints_reached += 1
-
-        final = (waypoints[-1][0], waypoints[-1][1], takeoff_z)
         hold_position_until(
-            node, px4, clock, x=final[0], y=final[1], z=final[2],
-            is_reached=make_hold_condition(final, final_hover_s),
-            timeout_s=WAYPOINT_WALL_WATCHDOG_S, description="final hover")
+            node, px4, clock, setpoint_fn=lambda: state["tracker"].setpoint,
+            is_reached=mission_poll, timeout_s=MISSION_WALL_WATCHDOG_FACTOR * timeout_s,
+            description="fly the mission")
 
-        land_and_wait(node, px4, clock)
-        reason = TerminationReason.COMPLETED
+        land()
+        reason = (TerminationReason.RECOVERY_LANDED if driver.action.land
+                  else TerminationReason.COMPLETED)
     except FlightSequenceError as exc:
         reason = _REASON_FOR_ERROR.get(type(exc), TerminationReason.ABORTED_ERROR)
     except Exception as exc:
@@ -360,7 +411,7 @@ def fly_mission(node, px4: PX4Interface, clock: PX4Clock, mission: dict[str, Any
     return MissionResult(
         termination_reason=reason.value,
         n_steps=len(steps),
-        waypoints_reached=waypoints_reached,
+        waypoints_reached=state["tracker"].waypoints_reached if state["tracker"] else 0,
         position_rmse_m=rmse,
         final_position_error_m=final_err,
         t_sim_start_s=state["t_sim_start_s"],

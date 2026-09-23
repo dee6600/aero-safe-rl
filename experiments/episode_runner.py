@@ -92,7 +92,8 @@ class EpisodeRunner:
                  mission_digest: str, env_versions_json: str,
                  results_dir: str | Path = "results",
                  feature_version: str = FEATURE_VERSION_UNSET,
-                 enable_rotor_fault: bool = False):
+                 enable_rotor_fault: bool = False,
+                 recovery=None):
         self.spec = spec
         self.run_id = run_id
         self.mission_id = mission_id
@@ -104,6 +105,13 @@ class EpisodeRunner:
         # M6: off by default, so every M3/M4/M5 caller is unaffected. Only
         # M6's dataset generator (task 9) passes True.
         self.enable_rotor_fault = enable_rotor_fault
+
+        # M8: the recovery policy (+ detector) every episode flies under.
+        # Built once per worker, inside the worker process (CLAUDE.md §3.3);
+        # RecoveryConfig() is no recovery, no detector.
+        from rl.policy_driver import RecoveryConfig
+        self.recovery = recovery if recovery is not None else RecoveryConfig()
+        self.driver = self.recovery.build()
 
         from aero_bridge.episode_logger import EpisodeLogger
         self.logger = EpisodeLogger(run_id, worker_id=spec.instance, results_dir=results_dir)
@@ -294,7 +302,8 @@ class EpisodeRunner:
                 on_step(row)
 
         t_wall_start = time.time()
-        result = fly_mission(self.node, self.px4, self.clock, self.mission, on_step=_on_step)
+        result = fly_mission(self.node, self.px4, self.clock, self.mission, on_step=_on_step,
+                             driver=self.driver)
         t_wall_end = time.time()
 
         t_sim_start = result.t_sim_start_s if result.t_sim_start_s is not None else 0.0
@@ -347,6 +356,7 @@ class EpisodeRunner:
             # not a placeholder -- since px4_failure_detector_status (schema
             # v4) is logged on every step regardless of whether a fault was
             # ever commanded (mission_executor.py's record_step()).
+            **self.driver.provenance,
             px4_failure_detector_silent=all(
                 s["px4_failure_detector_status"] == 0 for s in result.steps
             ) if result.steps else True,

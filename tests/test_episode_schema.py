@@ -57,6 +57,10 @@ VALID_EPISODE = dict(
     fault_confirmed_applied=False,
     fault_confirmed_severity_final=0.0,
     px4_failure_detector_silent=True,
+    policy_name="nominal",
+    policy_config_digest="none",
+    action_spec_digest="abc",
+    detector_checkpoint_digest="none",
 )
 
 VALID_STEP = dict(
@@ -79,6 +83,9 @@ VALID_STEP = dict(
     accel_x_m_s2=0.0, accel_y_m_s2=0.0, accel_z_m_s2=-9.81,
     motor_0_output=0.5, motor_1_output=0.5, motor_2_output=0.5, motor_3_output=0.5,
     px4_failure_detector_status=0,
+    flight_phase="mission", policy_state="", action_speed_scale=1.0,
+    action_altitude_offset_m=0.0, action_land=False, det_p_fault=float('nan'),
+    det_rotor=-1, det_severity=float('nan'), det_uncertainty=float('nan'), det_alarm=False,
 )
 
 

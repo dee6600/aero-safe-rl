@@ -5,7 +5,7 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1, M1b, M3, M5, M6 and M7 done. M4 substantially done
+Status: M0 (incl. addendum), M1, M1b, M3, M5, M6, M7 and M8 done. M4 substantially done
 (one deferred sim-marked test, `tests/sim/test_worker_restart.py`, still
 open — see M4). M2 substantially done —
 both known multi-instance bugs fixed and verified; a third, subtler bug
@@ -2496,7 +2496,7 @@ tests/sim/conftest.py               (extended — sim_workers_0_1_x500_aero fixt
 
 ---
 
-# M8 — Rule-based recovery baseline
+# M8 — Rule-based recovery baseline ✅
 
 **Goal:** a genuinely well-tuned, non-learning recovery system — what the RL
 policy has to beat. Under-tuning this to make RL look better invalidates the
@@ -2512,6 +2512,218 @@ whole comparison; reviewers see through it immediately.
   machine with hysteresis (a flickering detector must not cause mode thrash),
   and thresholds tuned via a documented, archived sweep.
 - Verified not to panic-land a healthy drone on a brief false alarm.
+
+**Started 2026-09-23.** Detail below written at start, per the stub policy.
+
+### What the M6 dataset says about recovery (measured 2026-09-23, before any design)
+
+A throwaway probe over the 741 valid `m6_dataset_v1` flights, looking at what
+happens *after* onset:
+
+| true severity | reaches the ground mid-flight | vertical speed at impact (median) |
+|---|---|---|
+| ≤ 0.30 | 0% — mission completes | — |
+| 0.30–0.35 | 9% | — |
+| 0.35–0.40 | 34% (50% if moving > 1 m/s at onset, 26% if hovering) | ~1.5 m/s |
+| 0.40–0.45 | 94% | 2.5 m/s |
+| 0.45–0.50 | 88–100% | 3.4 m/s |
+| 0.50–0.60 | 96% | 4.7 m/s |
+| > 0.60 | ~96%, mostly flipped after impact | 6–7 m/s |
+
+1. **There is a hard physical limit at s\* ≈ 0.41.** The x500 (2.06 kg,
+   8.55 N max per rotor — stock PX4 physics) needs 59% of its total thrust to
+   hover; healthy motor command is 0.74. Level, yaw-balanced hover needs all
+   four rotors at equal thrust, so a rotor that has lost more than
+   1 − 0.59 = 0.41 caps the total below the weight. The measured cliff sits
+   exactly there. **Kept as is and reported as a finding** (user decision
+   2026-09-23) — raising the thrust margin would invalidate M6 and M7.
+2. **Recovery can matter only between about s = 0.30 and 0.50.** Below 0.30
+   the mission succeeds unaided. At 0.35–0.40 speed matters (above). At
+   0.40–0.50 the drone comes down regardless, but a fall's impact speed grows
+   with √height, so descending to ~2 m on suspicion turns ~2.5 m/s impacts
+   into ~1.6 m/s ones. Above 0.50 no high-level action helps; C2/C3/C4 are
+   expected to tie there in M10, and that is reported, not hidden.
+3. **Nothing recognised a crash.** The 332 `hold_timeout` episodes are mostly
+   drones on the ground while the 60 s wall watchdog runs out. M8 adds a real
+   `crashed` termination, which also saves ~1 min of wall time per crash.
+4. **Every flight is flown flat out.** A waypoint is a position jump, so PX4
+   flies each leg at ~9 m/s peak with tilt up to its 45° cap. "Slow down"
+   therefore needs a moving setpoint ("carrot") generated on our side.
+
+### Design — confirmed by the user 2026-09-23
+
+- **Action space `action_v1` — 3 dims** (not planning.md §7.2's 5):
+  `speed_scale` ∈ [0, 1] (carrot speed along the mission path as a fraction
+  of PX4's `MPC_XY_VEL_MAX` = 12 m/s; 0 = hold position), `altitude_offset_m`
+  ∈ [−3.5, 0] (relative to mission altitude, reached at a fixed vertical
+  rate), `land` ∈ [0, 1] (≥ 0.5 commits to PX4's own land at the current
+  position — irreversible). The 5-dim version's "progress rate" duplicated
+  `speed_scale = 0`, and its climb-rate scale bought nothing this data shows.
+- **Nominal action = today's flight.** `speed_scale = 1` moves the carrot at
+  12 m/s, which reaches a 15 m waypoint in 1.25 s, so the flight is
+  effectively the M6 position jump. Verified live (task 3), because the
+  detector was trained only on those flights. C1/C2 fly the nominal action
+  through the same code path as C3/C4, so the setpoint generator is never a
+  confound.
+- **Outcome, per episode** (pure classifier in `experiments/metrics.py`):
+  `crash` if tilt ever exceeds 60° or the vehicle touches the ground at more
+  than **2.0 m/s** vertical (user decision; sensitivity at 1.5 and 2.5 m/s
+  reported); otherwise `mission_success` if every waypoint was reached and it
+  landed, `safe_landing` if it landed before finishing, `incomplete` if
+  neither. Frozen before any tuning run.
+- **What a policy sees** — one `PolicyInput` per 5 Hz decision: the
+  observation_v1 features, the detector's `DetectorOutput`, and mission
+  progress (waypoint index, distance to it, altitude). The FSM and M9's RL
+  policy receive exactly this and return exactly an `action_v1` action. M9
+  freezes the flat vector layout; M8 fixes the content.
+- **FSM tuning is split** so the expensive part stays small. The *detection*
+  side (suspect threshold, confirmation hold) is tuned offline by replaying
+  detector traces over M7's **validation** episodes. Every M7 healthy false
+  alarm lasted ≤ 0.9 s, so the hold should come out longer than that. The
+  *response* side (degraded speed, degraded altitude, severity above which to
+  land at once) needs the simulator. A small sweep on seeds disjoint from
+  M10's evaluation seeds.
+
+### Tasks
+
+1. ✅ **Contracts + pure pieces.** `configs/rl/action_v1.yaml`;
+   `rl/policies/base_policy.py` (`PolicyInput`, `Action` decoded and clipped
+   from the spec, `BasePolicy`, `NominalPolicy` = no recovery);
+   `rl/mission_tracker.py` (the carrot: one pure object advanced by sim-time
+   dt, the only PX4-side meaning of an action). No simulator.
+   **Done 2026-09-23.** `MissionTracker` also takes over waypoint
+   sequencing: reach within the acceptance radius (3D, at the current
+   altitude offset), hold, advance, then the final hover. That is the same
+   sequence `fly_mission` flies today, so task 3 can swap it in without
+   changing what "waypoint reached" means. A waypoint counts only once the
+   carrot has arrived at it. Takeoff to mission altitude is not
+   rate-limited, only changes of the offset are, so the nominal flight
+   matches M6's. The spec carries a digest for M9 checkpoints.
+   26 tests in `tests/test_action_spec.py` and `tests/test_mission_tracker.py`.
+2. ✅ **Outcomes + crash detection.** `classify_outcome()` in
+   `experiments/metrics.py`; online crash detection in `fly_mission`; episode
+   schema v5 (`crashed`, `recovery_landed`; per-step action, detector output
+   and policy state).
+   **Done 2026-09-23.** The outcome thresholds became a contract file,
+   `configs/rl/outcome_v1.yaml`, because M8b's Isaac reward and M9's
+   transfer table must judge flights by the same rule. The online
+   termination is `ground_contact`, not `crashed`: the flight ends at any
+   uncommanded touchdown, and whether that was a crash is decided offline
+   from touchdown speed and tilt. A slow sink onto the ground is a
+   `safe_landing`. Schema v5 adds `ground_contact` / `recovery_landed`,
+   policy provenance (policy name, config, action-spec and detector
+   digests) per episode, and per step the flight phase, action, FSM state
+   and detector output. Landings are now recorded step by step, since
+   touchdown is what the crash rule judges. RMSE still counts
+   mission-phase steps only, so it stays comparable with M3/M6.
+   14 tests in `tests/test_recovery_outcome.py`.
+3. ✅ **Policy-driven flight.** `fly_mission` driven by a policy through
+   `MissionTracker`, plumbed through `EpisodeRunner`/`SimFarm` (policy and
+   detector built inside the worker process, §3.3). Live on 2 workers:
+   `NominalPolicy` healthy flights match M6's within the D11 band (duration,
+   RMSE, peak speed, detector false alarms).
+   **Done 2026-09-23.** `rl/policy_driver.py` runs the detector on every
+   10 Hz step and the policy at 5 Hz of sim time, latches a land decision,
+   and annotates each row. `RecoveryConfig` is the picklable description
+   SimFarm passes to workers. `hold_position_until` gained a `setpoint_fn`
+   and `land_and_wait` an `on_poll` hook. A missing sim-clock read now
+   skips the tick instead of stamping t = 0, which the feature windows
+   would reject as time going backwards. One runner,
+   `experiments/run_recovery.py`, serves every M8 simulator run.
+   **Live check** (`results/m8_check_nominal`, 2 workers, 1×): 6 healthy
+   flights completed in 41.1–44.0 s (M6 median 43.9 s), RMSE 6.34–6.82 m
+   (M6 p10–p90 5.97–6.86), peak speed 9.0–9.2 m/s (M6 8.97), max tilt
+   42–44° (M6 43.9°). The two s = 0.5 faults ended as `ground_contact`
+   after 11 and 15 s of flight, instead of a 60 s hang. `sim_stop` left 0
+   processes. `tests/sim/test_policy_flight.py` passed on 2 concurrent
+   workers: nominal flight completed and was classified `mission_success`;
+   the FSM against s = 0.6 committed to land 1.25 s after onset and still
+   touched down at 5.4 m/s (a crash — above s ≈ 0.5, as expected).
+   12 tests in `tests/test_policy_driver.py`, 2 new in
+   `tests/test_arming_sequence.py`.
+4. ✅ **The FSM** — `rl/policies/rule_based.py`, `configs/rl/fsm_v1.yaml`, and
+   the offline detection-side tuning on M7's validation split.
+   **Done 2026-09-23.** States NORMAL → SUSPECTED → RECOVERING (continue,
+   degraded) or ABORTED (land). planning.md's CONFIRMED is the transition
+   between them, and LANDED is the judged outcome. A confirmation latches,
+   because the fault persists. Hysteresis runs on both thresholds and both
+   hold times. **Detection tuning, with one honest revision.** The rule
+   as first written (zero false confirmations on 109 validation episodes,
+   then the fastest confirmation) picked suspect_p 0.3 with a 0.4 s hold.
+   The first live healthy flights showed that was too short: one flight had
+   p ≥ 0.3 for 0.72 s at a waypoint turn and would have been falsely
+   confirmed. Validation's 0.76 healthy hours never showed such a run; the
+   train split's 3.56 healthy hours had one of 1.03 s. The rule now also
+   requires the hold to exceed the longest healthy run above the threshold
+   in any non-test data, by one decision period. It picks **suspect_p 0.5,
+   hold 1.0 s**, with median confirmation 1.63 s after onset at
+   s 0.3–0.5. The revision was made before any response tuning, and is
+   written in `fsm_v1.yaml` and `results/m8_fsm_tuning/detection_sweep.json`.
+   `experiments/tune_fsm.py` reproduces both steps. 12 tests in
+   `tests/test_rule_based_policy.py`, 11 in `tests/test_recovery_tools.py`.
+5. ✅ **Response sweep** on the simulator, archived under
+   `results/m8_fsm_sweep_*` (configs in `results/m8_fsm_sweep_configs/`).
+   **Done 2026-09-23.** Six settings × s {0.35–0.50} × 8 flights, plus a
+   no-recovery reference. The two leaders differed by one flight, so both
+   were flown 12 more times (user decision: fly more, keep the rule). The
+   defaults won on pooled crash rate (39% vs 45%), at the stated cost of
+   aborting 95% of s 0.35 missions. Result recorded in `fsm_v1.yaml`.
+6. ✅ **Validation run + report.** The rule-based recovery controller vs
+   `NominalPolicy` across severities, plus healthy flights (no panic
+   landings) → `docs/recovery_baseline.md`.
+   **Done 2026-09-23.** Seed 8201, 137 valid flights. **The controller does
+   not beat no recovery.** Crash rates are equal or worse at every severity,
+   and it gives up missions at s 0.2–0.35. Zero landings on 14 healthy
+   flights. Cause, found in the logs: its own 3 m recovery descent makes
+   the detector (trained on level flight only) over-read severity
+   (0.2–0.3 → 0.4–0.7), which triggers "land now". This matters for M8b's
+   detector-output simulator.
+
+### Files created
+
+```
+configs/rl/action_v1.yaml           (task 1)
+rl/__init__.py, rl/policies/__init__.py
+rl/policies/base_policy.py          (task 1; outcome + observation loaders in 2/3)
+rl/mission_tracker.py               (task 1)
+configs/rl/outcome_v1.yaml          (task 2)
+experiments/metrics.py              (task 2 — classify_outcome)
+configs/schema/episode_record.yaml  (task 2 — v5)
+rl/policy_driver.py                 (task 3)
+aero_bridge/mission_executor.py     (task 3 — flies through MissionTracker + PolicyDriver)
+aero_bridge/arming_sequence.py      (task 3 — setpoint_fn, on_poll)
+experiments/episode_runner.py, experiments/sim_farm.py  (task 3 — RecoveryConfig plumbing)
+experiments/run_recovery.py         (task 3 — every M8 simulator run + scoring)
+rl/policies/rule_based.py           (task 4)
+configs/rl/fsm_v1.yaml              (task 4)
+experiments/tune_fsm.py             (tasks 4–5)
+docs/recovery_baseline.md           (task 6)
+```
+
+### Tests (required)
+
+```
+tests/test_action_spec.py           decode/clip, land threshold, spec matches the dataclass
+tests/test_mission_tracker.py       carrot speed = scale x v_max, hold at 0, altitude rate, waypoint advance
+tests/test_recovery_outcome.py      crash / safe_landing / success / incomplete on hand-built series
+tests/test_rule_based_policy.py     hysteresis (flicker does not thrash), ≤0.9 s alarm never confirms,
+                                    CONFIRMED latches, severity -> response table, land is irreversible
+tests/test_policy_driver.py         5 Hz sim-time cadence, land latch, row annotation, no ground truth
+tests/test_recovery_tools.py        schedule, FSM replay, detection + response selection rules
+tests/sim/test_policy_flight.py     2 workers: nominal flight matches M6; FSM lands on an injected fault
+```
+
+### Done when
+
+- [x] The rule-based recovery controller beats `NominalPolicy` on crash rate
+      in the s 0.35–0.50 band, or the report says plainly that it does not.
+      **It does not** — `docs/recovery_baseline.md`.
+- [x] Zero controller-commanded landings over the healthy validation flights
+      (14 of 14).
+- [x] Sweep archived and documented, thresholds chosen by a rule written down
+      before the sweep ran. One revision to the detection rule, made before
+      response tuning and documented.
+- [x] Default test suite passes; sim tests run on 2 concurrent workers.
 
 ---
 
@@ -2746,7 +2958,7 @@ Update this as milestones complete.
 | M5 | **Done** | 2026-09-22 | Was M4. `configs/features.yaml` (13 shared + 6 px4_only, `feature_version` "1"), `configs/rl/observation_v1.yaml`, `configs/rl/normalization_v1.yaml`, and `ai/features/feature_extractor.py` (pure, no ROS import). Verified against a live flight as well as fixtures. Detail: M5 section above. |
 | M6 | **Done** | 2026-09-23 | Was M5. `RotorDegradationSystem` plugin (scales thrust and reaction torque together), `x500_aero` model, `RotorFaultController`, fault integration in `EpisodeRunner`/`SimFarm`, thrust cross-validation fixture, episode schema v4. **Dataset `results/m6_dataset_v1/`: 750/750 episodes, 741 valid**, 2 workers × 1×, resumed twice via `--resume` with no episodes lost. Headline finding: PX4's own `FailureDetector` stays silent in 100% of faulty episodes at severity [0.2, 0.4) and 63% at [0.8, 1.0]. Full analysis: `docs/fault_dataset.md`. |
 | M7 | **Done** | 2026-09-23 | Was M6. Rotor-symmetric streaming GRU, 5-member ensemble (user-chosen over a 1D-CNN). On the test flights it detects weak faults (s 0.2–0.4) in a median 0.88 s vs the random forest's 1.18 s, identifies the rotor 98.6–99.8% of the time, and estimates severity with MAE ≤ 0.022. ECE is 0.004 and uncertainty→error AUROC 0.91. Tick AUROC ties the random forest; the model loses on false alarms (6 vs 4 short events in 0.69 h). Verified live on 2 concurrent workers (right rotor, ~0.55 s delay, p99 tick ≤ 10.7 ms), after fixing a real live-latency overshoot (p99 34.5 ms → stacked-weights streaming path). `error_model.json` written for M8b. Full results: `docs/detector_results.md`. |
-| M8 | Not started | | Was M7. |
+| M8 | **Done** | 2026-09-23 | Was M7. Physics limit: hover is impossible above rotor severity ≈ 0.41, so recovery can matter only for s ≈ 0.35–0.45. Built the 3-dimension action spec, the outcome rule (crash = tilt > 60° or touchdown > 2.0 m/s), the moving-setpoint mission tracker, policy-driven flight with ground-contact termination (episode schema v5), and the rule-based recovery controller, tuned offline then on the simulator. **Validation: the controller does not beat flying with no recovery.** It never landed a healthy drone, but its own recovery descent makes the detector over-read severity and trigger needless landings. Full results: `docs/recovery_baseline.md`. |
 | M8b | Not started | | **New milestone (D12)**: Isaac Lab training environment. Depends on M3b, M5, M6, M7. |
 | M9 | Not started | | Was M8. Rescoped by D12: trains in Isaac, evaluates on PX4, adds the RQ5 transfer table. |
 | M10 | Not started | | Was M9. |

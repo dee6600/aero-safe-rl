@@ -1,0 +1,58 @@
+# Rule-based recovery FSM (M8, rl/policies/rule_based.py). Every threshold
+# the baseline uses lives here. How each value was chosen -- by a rule
+# written down before the data that sets it was looked at -- is recorded
+# beside it and in docs/recovery_baseline.md. Changing a value means a new
+# file (fsm_v2.yaml), not an edit: episode records carry this file's digest.
+
+fsm_version: "1"
+
+# Detection side: tuned OFFLINE (experiments/tune_fsm.py detection), by
+# replaying the M7 detector over recorded flights and stepping this FSM at
+# 5 Hz on its output. Never the M7 test split.
+#
+# Rule as first written: among the grid (suspect_p {0.097, 0.3, 0.5} x hold
+# {0.4 .. 2.0} s), keep settings with zero false confirmations on the 109
+# validation episodes; take the smallest median confirmation delay at
+# s 0.3-0.5; ties towards the longer hold. It chose 0.3 / 0.4 s.
+#
+# REVISED 2026-09-23, before any response tuning, because that choice failed
+# live: in the first 6 healthy flights on the M8 flight path
+# (results/m8_check_nominal) one had p_fault >= 0.3 for 0.72 s around a
+# waypoint turn and would have been falsely confirmed. Validation's 0.76
+# healthy hours never showed a run above 0.3 longer than one decision, but
+# the train split's 3.56 healthy hours had one of 1.03 s -- validation alone
+# was too small to see the tail. Revised rule: additionally, the hold must
+# be at least one decision (0.2 s) longer than the longest healthy run above
+# suspect_p in ANY non-test healthy data (train + val + live check).
+# Longest runs (results/m8_fsm_tuning/detection_sweep.json): above 0.097
+# 6.57 s, above 0.3 1.03 s, above 0.5 0.72 s. Chosen 0.5 / 1.0 s: median
+# confirmation 1.63 s after onset at s 0.3-0.5 (p90 1.89 s).
+detection:
+  suspect_p: 0.5
+  clear_p: 0.05             # above the healthy p95 of p_fault (0.043, M7 test)
+  confirm_hold_s: 1.0
+  clear_hold_s: 1.0
+
+# Response side: tuned on the SIMULATOR (experiments/tune_fsm.py sweep), on
+# seeds disjoint from M10's evaluation seeds. Rule, fixed before running:
+# minimise the crash rate over s in {0.35, 0.40, 0.45, 0.50}; break ties by
+# mission-success rate, then by the simpler setting.
+#
+# Result (results/m8_fsm_tuning/response_sweep.json): 6 candidates x
+# s {0.35, 0.40, 0.45, 0.50} x 8 flights, one shared fault schedule. The two
+# leaders differed by one flight, so both were flown 12 more times at
+# s {0.35, 0.40, 0.45} (user decision: fly more, keep the rule). Pooled crash
+# rate: these defaults 26/67 (39%), "land only above 0.45" 28/62 (45%) ->
+# these defaults kept. Stated trade-off: at s 0.35 they abort 95% of missions
+# (the severity estimate drifts over land_severity), where "land above 0.45"
+# completes 89%. The crash difference is two flights; weak evidence.
+responses:
+  suspected:                # before confirmation: a cheap precaution
+    speed_scale: 0.5
+    altitude_offset_m: 0.0
+  degraded:                 # confirmed, severity below land_severity: continue
+    speed_scale: 0.3
+    altitude_offset_m: -3.0
+  # Confirmed severity at or above this: land now. s* ~= 0.41 is where
+  # hover stops being physically possible (milestones.md M8).
+  land_severity: 0.40

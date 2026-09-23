@@ -148,12 +148,16 @@ def test_spawn_worker_passes_this_workers_own_fault_specs_slice(monkeypatch):
                         mission=farm._mission, mission_digest=farm._mission_digest,
                         env_versions_json=farm._env_versions_json)
 
-    # args tuple order: (..., result_queue, enable_rotor_fault, fault_specs, fault_config_digest)
-    assert captured_args[0][-3] is True  # enable_rotor_fault
-    assert captured_args[0][-2] == specs_by_worker[0]
-    assert captured_args[0][-1] == "digest123"
-    assert captured_args[1][-2] == specs_by_worker[1]
-    assert captured_args[1][-2] is not captured_args[0][-2]
+    # args tuple order: (..., result_queue, enable_rotor_fault, fault_specs,
+    # fault_config_digest, recovery)
+    assert captured_args[0][-4] is True  # enable_rotor_fault
+    assert captured_args[0][-3] == specs_by_worker[0]
+    assert captured_args[0][-2] == "digest123"
+    assert captured_args[1][-3] == specs_by_worker[1]
+    assert captured_args[1][-3] is not captured_args[0][-3]
+    # M8: every worker gets the run's recovery config (default: no recovery).
+    assert captured_args[0][-1] == captured_args[1][-1] == farm.recovery
+    assert farm.recovery.policy == "nominal"
 
 
 def test_resume_seeds_completed_per_worker_from_existing_files(monkeypatch, tmp_path):

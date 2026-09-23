@@ -1,0 +1,53 @@
+# Recovery-policy action spec (CLAUDE.md §0.1 -- one of the artifacts that
+# cross the isaacsim/aero-safe-rl environment boundary). Written in M8, where
+# the rule-based FSM is the first thing that acts through it; M9's RL policy
+# inherits it unchanged, so the two can never differ in what they are allowed
+# to do (milestones.md M8, "Design").
+#
+# 3 dims, not planning.md §7.2's 5 (user decision 2026-09-23): that version's
+# "progress rate" duplicated speed_scale = 0, and its climb-rate scale bought
+# nothing the M6 data shows matters. Every action is high-level -- never a
+# motor command (planning.md §7.2).
+#
+# Read by rl/policies/base_policy.py (decode + clip) and
+# rl/mission_tracker.py (what an action means on the PX4 side). M8b's Isaac
+# env must give each field the same meaning.
+
+action_version: "1"
+
+# One policy decision per this many Hz of simulated time (planning.md §7.1).
+decision_rate_hz: 5.0
+
+# Order is the vector layout an RL policy outputs.
+actions:
+  # Carrot speed along the mission path, as a fraction of v_max_xy_m_s.
+  # 0 = hold position at the carrot.
+  - name: speed_scale
+    low: 0.0
+    high: 1.0
+    nominal: 1.0
+  # Offset from the mission's altitude, metres (negative = lower). Reached at
+  # v_z_m_s. The floor keeps square_circuit's 5 m mission at >= 1.5 m AGL,
+  # above its geofence floor (0.5 m).
+  - name: altitude_offset_m
+    low: -3.5
+    high: 0.0
+    nominal: 0.0
+  # >= land_threshold commits to PX4's own land at the current position.
+  # Irreversible: once committed, the policy is not consulted again.
+  - name: land
+    low: 0.0
+    high: 1.0
+    nominal: 0.0
+
+land_threshold: 0.5
+
+carrot:
+  # PX4 v1.17 MPC_XY_VEL_MAX default. At speed_scale = 1 the carrot crosses a
+  # 15 m leg in 1.25 s, so the nominal flight is effectively M6's position
+  # jump -- the only flights the M7 detector has seen.
+  v_max_xy_m_s: 12.0
+  # PX4 v1.17 MPC_Z_VEL_MAX_DN default. Rate at which a change of
+  # altitude_offset_m is applied (takeoff to mission altitude is not
+  # rate-limited here, again to keep the nominal flight identical to M6's).
+  v_z_m_s: 1.5

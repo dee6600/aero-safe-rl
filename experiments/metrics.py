@@ -1,6 +1,7 @@
 """The one place any metric in this project is computed (milestones.md M10).
-Created in M7 with the fault-detector metrics; M10 adds the recovery metrics
-here rather than in a second module.
+Created in M7 with the fault-detector metrics; M8 adds the per-flight
+outcome (classify_outcome); M10 adds the rest of the recovery metrics here
+rather than in a second module.
 
 Detector metrics take whole episodes (ai.detector.dataset.EpisodeData) and
 one DetectorTrace per episode -- the per-tick output of any detector, learned
@@ -24,13 +25,16 @@ Protocol (milestones.md M7 task 2):
 """
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
 from ai.detector.dataset import EpisodeCategory, EpisodeData, stratum
+from experiments.episode_schema import TerminationReason
+from rl.policies.base_policy import OutcomeSpec, load_outcome_spec
 
 ALARM_HOLD_TICKS = 5
 HEALTHY_QUANTILE = 0.995
@@ -207,3 +211,62 @@ def evaluate_detector(episodes: Sequence[EpisodeData], traces: Sequence[Detector
         out["groups"][g] = row
         out["delays_s"][g] = delays
     return out
+
+
+# --------------------------------------------------------------- recovery (M8)
+
+class Outcome(str, enum.Enum):
+    """How one flight ended, judged by configs/rl/outcome_v1.yaml."""
+    MISSION_SUCCESS = "mission_success"   # mission completed, no crash
+    SAFE_LANDING = "safe_landing"         # on the ground gently before finishing
+    CRASH = "crash"                       # tilt or touchdown speed over the limit
+    INCOMPLETE = "incomplete"             # none of the above (timeout, offboard lost, ...)
+
+
+@dataclass(frozen=True)
+class EpisodeOutcome:
+    outcome: Outcome
+    touchdown_speed_m_s: float   # downward speed at first ground contact; nan if none
+    max_tilt_deg: float          # over the airborne part of the flight; nan if never airborne
+
+
+def first_ground_contact(alt_m: np.ndarray, spec: OutcomeSpec) -> tuple[Optional[int], Optional[int]]:
+    """(first airborne tick, first ground-contact tick after it). Either is
+    None when it never happens."""
+    alt_m = np.asarray(alt_m, dtype=float)
+    up = np.flatnonzero(alt_m >= spec.airborne_alt_m)
+    if len(up) == 0:
+        return None, None
+    down = np.flatnonzero(alt_m[up[0]:] < spec.ground_contact_alt_m)
+    return int(up[0]), (int(up[0] + down[0]) if len(down) else None)
+
+
+def classify_outcome(termination_reason: str, steps: Mapping[str, Sequence[float]],
+                     spec: Optional[OutcomeSpec] = None, *,
+                     crash_touchdown_speed_m_s: Optional[float] = None) -> EpisodeOutcome:
+    """Classifies one flight from its step records (pos_z, vel_z, roll_rad,
+    pitch_rad; NED, so down is +z). `crash_touchdown_speed_m_s` overrides the
+    spec's limit for the sensitivity table only."""
+    spec = spec or load_outcome_spec()
+    limit = spec.crash_touchdown_speed_m_s if crash_touchdown_speed_m_s is None else crash_touchdown_speed_m_s
+    alt = -np.asarray(steps["pos_z"], dtype=float)
+    vz = np.asarray(steps["vel_z"], dtype=float)
+    tilt = np.degrees(np.hypot(np.asarray(steps["roll_rad"], dtype=float),
+                               np.asarray(steps["pitch_rad"], dtype=float)))
+
+    airborne, contact = first_ground_contact(alt, spec)
+    max_tilt = float(np.nanmax(tilt[airborne:])) if airborne is not None else float("nan")
+    # The tick before contact as well as the contact tick: at 10 Hz the
+    # vehicle may already have stopped by the contact sample.
+    touchdown = (float(np.nanmax(vz[max(contact - 1, 0):contact + 1]))
+                 if contact is not None else float("nan"))
+
+    if max_tilt > spec.crash_tilt_deg or touchdown > limit:
+        outcome = Outcome.CRASH
+    elif termination_reason == TerminationReason.COMPLETED.value:
+        outcome = Outcome.MISSION_SUCCESS
+    elif contact is not None:
+        outcome = Outcome.SAFE_LANDING
+    else:
+        outcome = Outcome.INCOMPLETE
+    return EpisodeOutcome(outcome, touchdown, max_tilt)

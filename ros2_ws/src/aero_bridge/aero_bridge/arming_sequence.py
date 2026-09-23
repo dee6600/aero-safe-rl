@@ -157,8 +157,9 @@ def _raise_arm_failure(px4, status, timeout_s: float) -> None:
 
 
 def hold_position_until(node, px4: PX4Interface, clock: PX4Clock, *,
-                         x: float, y: float, z: float,
-                         is_reached, timeout_s: float, description: str) -> None:
+                         x: float = 0.0, y: float = 0.0, z: float = 0.0,
+                         is_reached, timeout_s: float, description: str,
+                         setpoint_fn=None) -> None:
     """Keep streaming a fixed position setpoint (required to stay in offboard
     mode) while polling `is_reached()`, returning as soon as it is True.
 
@@ -167,6 +168,10 @@ def hold_position_until(node, px4: PX4Interface, clock: PX4Clock, *,
     telemetry for a state-based one (see test_flight.py's takeoff altitude).
     Either way this function's own timeout_s remains a wall-clock hang
     watchdog, never the mission-relevant duration itself.
+
+    `setpoint_fn`, if given, is called before every publish and returns the
+    (x, y, z) to stream instead of the fixed x/y/z -- how M8's
+    MissionTracker streams its moving setpoint through this one loop.
 
     Re-engages offboard mode if PX4 ever leaves it mid-wait. Found during M2
     (confirmed via .ulg log analysis, and via a publish loop instrumented to
@@ -191,7 +196,7 @@ def hold_position_until(node, px4: PX4Interface, clock: PX4Clock, *,
 
         if now >= next_publish:
             px4.publish_offboard_heartbeat(position=True)
-            px4.publish_position_setpoint(x, y, z)
+            px4.publish_position_setpoint(*(setpoint_fn() if setpoint_fn is not None else (x, y, z)))
             next_publish = now + STREAM_PERIOD_S
 
         status = px4.latest['vehicle_status']
@@ -216,13 +221,17 @@ def hold_position_until(node, px4: PX4Interface, clock: PX4Clock, *,
 
 
 def land_and_wait(node, px4: PX4Interface, clock: PX4Clock, *,
-                   timeout_s: float = LAND_TIMEOUT_S) -> None:
+                   timeout_s: float = LAND_TIMEOUT_S, on_poll=None) -> None:
     """Command a landing and block until PX4 confirms DISARMED. Once
     VEHICLE_CMD_NAV_LAND is accepted, PX4's own AUTO_LAND mode takes over and
     no longer needs offboard setpoints, so -- unlike arm_and_engage_offboard
     and hold_position_until -- this does not stream anything, matching the
     original hand-verified M1 behaviour (a manual MAVLink check, before the
     ROS 2 bridge existed).
+
+    `on_poll`, if given, is called on every loop iteration (M8: recording
+    steps through touchdown, which is what the crash rule is judged on). An
+    exception it raises propagates to the caller.
     """
     wall_deadline = time.monotonic() + timeout_s
     next_command = time.monotonic()
@@ -237,6 +246,9 @@ def land_and_wait(node, px4: PX4Interface, clock: PX4Clock, *,
         if now >= next_command:
             px4.land()
             next_command = now + RESEND_INTERVAL_S
+
+        if on_poll is not None:
+            on_poll()
 
         if now > wall_deadline:
             raise LandTimeout(

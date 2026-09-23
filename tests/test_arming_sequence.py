@@ -262,3 +262,33 @@ def test_land_and_wait_raises_land_timeout():
     clock = make_clock(lambda t: None)
     with pytest.raises(LandTimeout):
         land_and_wait(None, px4, clock, timeout_s=0.02)
+
+
+# ------------------------------------------------- M8: moving setpoint, land hook
+
+
+def test_hold_position_until_streams_setpoint_fn_over_fixed_xyz():
+    px4 = FakePX4(status=make_status(armed=True, offboard=True))
+    clock = make_clock(lambda t: None)
+    polls = iter([False, False, True])
+    hold_position_until(None, px4, clock, is_reached=lambda: next(polls), timeout_s=1.0,
+                        description="test", setpoint_fn=lambda: (3.0, 4.0, -2.0))
+    assert px4.setpoints and all(sp == (3.0, 4.0, -2.0) for sp in px4.setpoints)
+
+
+def test_land_and_wait_calls_on_poll_and_propagates_its_exception():
+    px4 = FakePX4(status=make_status(armed=True))
+    clock = make_clock(lambda t: None)
+    polls = [0]
+
+    class Settled(Exception):
+        pass
+
+    def on_poll():
+        polls[0] += 1
+        if polls[0] == 3:
+            raise Settled()
+
+    with pytest.raises(Settled):
+        land_and_wait(None, px4, clock, timeout_s=1.0, on_poll=on_poll)
+    assert polls[0] == 3 and px4.land_calls >= 1
