@@ -1,0 +1,58 @@
+# Recovery-policy observation, version 2 (M8b task 1). One of the files that
+# cross the isaacsim / aero-safe-rl environment boundary (CLAUDE.md §0.1):
+# the PX4 side builds this vector in rl/policies/base_policy.py
+# (flatten_observation), the Isaac side in isaac/aero_isaac/observation.py.
+# Neither imports the other. tests/fixtures/isaac_contract_v1.json, recorded
+# from the PX4-side code, holds both to the same numbers.
+#
+# Content is M8's PolicyInput (the 13 observation_v1 features, the
+# detector's output, mission progress) plus the previous action, laid out in
+# the fixed order below. observation_v1.yaml is unchanged; it stays the
+# definition of the feature block. Changing anything here means a new file
+# (observation_v3.yaml), not an edit.
+#
+# Never add a ground-truth fault field here (CLAUDE.md §1.7). The detector
+# block is the detector's *estimate*; on the Isaac side it comes from the
+# simulated detector.
+#
+# source:    <block>.<field>. Blocks: feature (observation_v1 features, raw),
+#            detector (DetectorOutput), mission (MissionProgress),
+#            previous_action (the Action in force before this decision).
+# transform: normalize      (x - mean) / std from normalization_v1.yaml
+#            scale: k       x / k
+#            per: <field>   x / (the same block's <field>)
+#            one_hot: k     1.0 if x == k else 0.0
+#            (none)         x as is; a bool becomes 0.0 / 1.0
+
+obs_version: "2"
+feature_version: "1"
+normalization: configs/rl/normalization_v1.yaml
+
+entries:
+  - {source: feature.roll_rad, transform: normalize}
+  - {source: feature.pitch_rad, transform: normalize}
+  - {source: feature.yaw_rad, transform: normalize}
+  - {source: feature.rate_p_rad_s, transform: normalize}
+  - {source: feature.rate_q_rad_s, transform: normalize}
+  - {source: feature.rate_r_rad_s, transform: normalize}
+  - {source: feature.accel_x_m_s2, transform: normalize}
+  - {source: feature.accel_y_m_s2, transform: normalize}
+  - {source: feature.accel_z_m_s2, transform: normalize}
+  - {source: feature.vel_x, transform: normalize}
+  - {source: feature.vel_y, transform: normalize}
+  - {source: feature.vel_z, transform: normalize}
+  - {source: feature.position_error_m, transform: normalize}
+  - {source: detector.p_fault}
+  - {source: detector.severity}
+  - {source: detector.uncertainty}
+  - {source: detector.rotor, transform: {one_hot: 0}}
+  - {source: detector.rotor, transform: {one_hot: 1}}
+  - {source: detector.rotor, transform: {one_hot: 2}}
+  - {source: detector.rotor, transform: {one_hot: 3}}
+  - {source: mission.waypoint_index, transform: {per: n_waypoints}}
+  - {source: mission.distance_to_waypoint_m, transform: {scale: 15.0}}   # one square_circuit leg
+  - {source: mission.altitude_m, transform: {scale: 5.0}}               # mission altitude
+  - {source: mission.elapsed_s, transform: {scale: 120.0}}              # square_circuit timeout_s
+  - {source: previous_action.speed_scale}
+  - {source: previous_action.altitude_offset_m, transform: {scale: 3.5}}  # action_v1's lowest offset
+  - {source: previous_action.land}

@@ -1,4 +1,4 @@
-# Rule-based recovery FSM (M8, rl/policies/rule_based.py). Every threshold
+# Rule-based recovery controller (M8, rl/policies/rule_based.py). Every threshold
 # the baseline uses lives here. How each value was chosen -- by a rule
 # written down before the data that sets it was looked at -- is recorded
 # beside it and in docs/recovery_baseline.md. Changing a value means a new
@@ -7,7 +7,7 @@
 fsm_version: "1"
 
 # Detection side: tuned OFFLINE (experiments/tune_fsm.py detection), by
-# replaying the M7 detector over recorded flights and stepping this FSM at
+# replaying the M7 detector over recorded flights and stepping this controller at
 # 5 Hz on its output. Never the M7 test split.
 #
 # Rule as first written: among the grid (suspect_p {0.097, 0.3, 0.5} x hold

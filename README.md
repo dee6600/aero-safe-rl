@@ -24,6 +24,12 @@
 
 <sub>A healthy drone flying the M3 <code>square_circuit</code> mission (<a href="configs/missions/square_circuit.yaml">config</a>) through <code>EpisodeRunner</code>, the same code path every reported number comes from. Not a staged demo. Shown at 2× speed.</sub>
 
+<br><br>
+
+<img src="docs/media/isaac_four_drones.gif" alt="Four x500 drones in Isaac Lab flying the same mission with one weakened rotor each, at severities 0, 0.3, 0.45 and 0.7" width="560">
+
+<sub>The same mission in the Isaac Lab training environment: PX4's x500 model and a PyTorch port of PX4's flight controller. Four drones, each with one rotor weakened by 0%, 30%, 45% and 70%. The two weaker ones come down, as they do in Gazebo. Training runs up to 32,768 of these in parallel on one graphics card (<a href="docs/isaac_env.md">details</a>). Shown at 4× speed.</sub>
+
 </div>
 
 ---

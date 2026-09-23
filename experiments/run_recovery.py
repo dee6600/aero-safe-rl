@@ -1,7 +1,7 @@
 """M8: fly recovery episodes on the PX4 stack and score them.
 
 One command for every M8 simulator run -- the live check of the policy-driven
-flight (task 3), the FSM response sweep (task 5) and the validation run
+flight (task 3), the recovery controller's response sweep (task 5) and the validation run
 (task 6) -- and, from M10, each condition's cells:
 
     # fly: N episodes per severity (0 = healthy) under one recovery config
@@ -71,7 +71,8 @@ def fly(args) -> None:
     from rl.policy_driver import RecoveryConfig
 
     recovery = RecoveryConfig(policy=args.policy, policy_config=args.policy_config,
-                              detector_checkpoint=args.detector)
+                              detector_checkpoint=args.detector,
+                              constant_action=tuple(args.constant_action) if args.constant_action else None)
     n_total = len(args.severities) * args.episodes_per_severity
     per_worker = -(-n_total // args.worker_count)
     schedule = recovery_schedule(args.severities, args.episodes_per_severity,
@@ -120,6 +121,8 @@ def episode_rows(run_dir: Path) -> pd.DataFrame:
                                                     crash_touchdown_speed_m_s=v).outcome.value == "crash"
                 for v in spec.sensitivity_touchdown_speeds_m_s}
         mission = steps[steps.flight_phase == "mission"]
+        airborne = mission[-mission.pos_z > 1.0]
+        motors = airborne[[f"motor_{i}_output" for i in range(4)]].to_numpy(float)
         states = [x for x in steps.policy_state.unique() if x]
         rows.append(dict(
             key=f"{s.worker_id}/{s.episode_id}", severity=float(s.fault_severity_commanded),
@@ -128,6 +131,7 @@ def episode_rows(run_dir: Path) -> pd.DataFrame:
             waypoints_reached=int(s.waypoints_reached), t_sim_duration_s=float(s.t_sim_duration_s),
             position_rmse_m=float(s.position_rmse_m),
             peak_hspeed_m_s=float(np.hypot(mission.vel_x, mission.vel_y).max()) if len(mission) else np.nan,
+            mean_motor_command=float(np.nanmean(motors)) if motors.size else np.nan,
             policy_landed=bool(steps.action_land.any()), fsm_states=",".join(states),
             detector_alarm_edges=int((steps.det_alarm.astype(bool)
                                       & ~steps.det_alarm.astype(bool).shift(fill_value=False)).sum()),
@@ -147,6 +151,9 @@ def summarize(run_dir: Path, rows: Optional[pd.DataFrame] = None) -> dict:
         cell["policy_landed"] = float(g.policy_landed.mean())
         cell["median_duration_s"] = float(g.t_sim_duration_s.median())
         cell["median_touchdown_speed_m_s"] = float(g.touchdown_speed_m_s.median())
+        for col in ("peak_hspeed_m_s", "mean_motor_command"):
+            if col in g:
+                cell[f"median_{col}"] = float(g[col].median())
         out["by_severity"][f"{sev:.2f}"] = cell
     return out
 
@@ -167,7 +174,9 @@ def main(argv=None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fly")
     f.add_argument("--run-id", required=True)
-    f.add_argument("--policy", default="nominal", choices=["nominal", "rule_based"])
+    f.add_argument("--policy", default="nominal", choices=["nominal", "rule_based", "constant"])
+    f.add_argument("--constant-action", type=float, nargs=3, default=None,
+                   help="the constant policy's action: speed_scale altitude_offset_m land")
     f.add_argument("--policy-config", default=None)
     f.add_argument("--detector", default=None)
     f.add_argument("--severities", type=float, nargs="+", required=True)

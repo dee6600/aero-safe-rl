@@ -36,6 +36,10 @@ source ~/miniconda3/etc/profile.d/conda.sh && conda activate isaacsim
 Python 3.11, torch 2.7.0. Do **not** source ROS into this environment: ROS
 Humble's Python is 3.10 and putting it on `PYTHONPATH` next to a 3.11
 interpreter produces C-extension ABI errors that look like corrupt installs.
+Use `source scripts/activate_isaac.sh`: it activates the environment, strips
+the ROS paths that `~/.bashrc` adds to every shell, and sets
+`OMNI_KIT_ACCEPT_EULA=YES` (without it Isaac Sim's first import waits forever
+for a licence prompt).
 
 **Source the environment as part of every command, not once per session.**
 Each shell invocation starts clean, so a command run without it silently uses
@@ -239,6 +243,11 @@ needs a simulator is a suite nobody runs.
 pytest tests/ -m "not sim and not slow"    # the default; must always pass
 pytest tests/ -m sim                       # milestone gate
 ```
+
+The Isaac side has its own suite, run in the `isaacsim` environment:
+`source scripts/activate_isaac.sh && python -m pytest isaac/tests -m "not isaac and not slow"`
+(seconds, must always pass); `-m slow` for the closed-loop controller checks;
+`-m isaac` starts Isaac Sim headless (about 5 minutes).
 
 Always invoke it as `python -m pytest` from the repo root, so `pytest.ini` and
 the root `conftest.py` are picked up. `pytest.ini` disables ROS 2 Humble's own

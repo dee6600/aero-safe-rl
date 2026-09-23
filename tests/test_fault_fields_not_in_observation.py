@@ -64,3 +64,15 @@ def test_no_fault_field_is_marked_shared_in_features_yaml():
         f"configs/features.yaml marks ground-truth fault field(s) {leaked} as "
         f"side: shared -- a shared feature can end up in the policy observation "
         f"(configs/rl/observation_v1.yaml), which fault state must never do")
+
+
+def test_observation_v2_reads_only_observable_blocks():
+    """M8b: observation_v2 draws from the detector's *estimate*, mission
+    progress and the previous action -- never a ground-truth fault field,
+    and never a block other than those four."""
+    obs = yaml.safe_load(open("configs/rl/observation_v2.yaml"))
+    fault = set(_FAULT_EPISODE_FIELDS) | set(_FAULT_STEP_FIELDS)
+    for e in obs["entries"]:
+        block, field = e["source"].split(".", 1)
+        assert block in ("feature", "detector", "mission", "previous_action"), e
+        assert field not in fault and not field.startswith("fault_"), e

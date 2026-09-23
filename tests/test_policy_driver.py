@@ -151,3 +151,22 @@ def test_recovery_config_rejects_unknown_or_unconfigured_policy():
 
 def test_ground_contact_maps_to_its_termination_reason():
     assert _REASON_FOR_ERROR[GroundContact] == TerminationReason.GROUND_CONTACT
+
+
+def test_policy_sees_the_previous_action():
+    policy = RecordingPolicy([Action(0.4, -1.0, False), Action(0.2, -2.0, False)])
+    driver = PolicyDriver(policy, SPEC)
+    for i in range(4):
+        driver.step(_row(i * 0.1), PROGRESS)
+    assert policy.calls[0].previous_action == SPEC.nominal()
+    assert policy.calls[1].previous_action == Action(0.4, -1.0, False)
+
+
+def test_constant_policy_through_recovery_config():
+    cfg = RecoveryConfig(policy="constant", constant_action=(0.3, -3.0, 0.0))
+    driver = cfg.build()
+    assert driver.step(_row(0.0), PROGRESS) == Action(0.3, -3.0, False)
+    assert cfg.provenance()["policy_config_digest"] != "none"
+    assert pickle.loads(pickle.dumps(cfg)) == cfg
+    with pytest.raises(ValueError):
+        RecoveryConfig(policy="constant").build()

@@ -15,6 +15,7 @@ detector's torch state is created in the process that uses it.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import MutableMapping, Optional
@@ -45,9 +46,10 @@ def _no_detection():
 class RecoveryConfig:
     """Which policy and detector a run flies with. Paths are repo-relative or
     absolute. The default is no recovery and no detector."""
-    policy: str = "nominal"                    # "nominal" | "rule_based"
+    policy: str = "nominal"                    # "nominal" | "rule_based" | "constant"
     policy_config: Optional[str] = None        # e.g. configs/rl/fsm_v1.yaml
     detector_checkpoint: Optional[str] = None  # e.g. results/m7_detector_v1/detector.pt
+    constant_action: Optional[tuple] = None    # the "constant" policy's action vector
 
     def _path(self, p: Optional[str]) -> Optional[Path]:
         if p is None:
@@ -59,9 +61,13 @@ class RecoveryConfig:
         """The episode-record fields naming what flew the episode."""
         from ai.detector.model import file_digest
         cfg, ckpt = self._path(self.policy_config), self._path(self.detector_checkpoint)
+        if self.constant_action is not None:
+            config_digest = hashlib.sha256(repr(tuple(self.constant_action)).encode()).hexdigest()[:16]
+        else:
+            config_digest = file_digest(cfg) if cfg else "none"
         return dict(
             policy_name=self.policy,
-            policy_config_digest=file_digest(cfg) if cfg else "none",
+            policy_config_digest=config_digest,
             action_spec_digest=load_action_spec().digest,
             detector_checkpoint_digest=file_digest(ckpt) if ckpt else "none",
         )
@@ -75,6 +81,11 @@ class RecoveryConfig:
             if self.policy_config is None:
                 raise ValueError("rule_based policy needs policy_config")
             policy = RuleBasedPolicy.from_yaml(self._path(self.policy_config), spec)
+        elif self.policy == "constant":
+            from rl.policies.base_policy import ConstantPolicy
+            if self.constant_action is None:
+                raise ValueError("constant policy needs constant_action")
+            policy = ConstantPolicy(self.constant_action, spec)
         else:
             raise ValueError(f"unknown policy {self.policy!r}")
         detector = None
@@ -129,7 +140,7 @@ class PolicyDriver:
         if decide and due and not self._action.land:
             feats = self._extractor.extract(self._window)
             obs = PolicyInput(t_sim_s=t, features={n: feats[n] for n in self._obs_names},
-                              detector=det, mission=progress)
+                              detector=det, mission=progress, previous_action=self._action)
             self._action = self.spec.clip(self.policy.act(obs))
             self._next_decision_t = t + self.spec.decision_period_s
             self.n_decisions += 1

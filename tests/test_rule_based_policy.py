@@ -1,4 +1,4 @@
-"""M8 task 4: the rule-based recovery FSM (rl/policies/rule_based.py)."""
+"""M8 task 4: the rule-based recovery controller (rl/policies/rule_based.py)."""
 from dataclasses import replace
 from pathlib import Path
 

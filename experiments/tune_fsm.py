@@ -1,4 +1,4 @@
-"""M8 tasks 4-5: tuning the rule-based FSM, by rules fixed before the data.
+"""M8 tasks 4-5: tuning the rule-based recovery controller, by rules fixed before the data.
 
     # task 4 -- detection side, offline, on M7's VALIDATION episodes only
     python experiments/tune_fsm.py detection results/m6_dataset_v1 --out results/m8_fsm_tuning
@@ -11,7 +11,7 @@
 Detection side: the detector is replayed over recorded flights (batch
 inference, identical to streaming -- tests/test_detector_runtime.py) and the
 real RuleBasedPolicy is stepped at 5 Hz on its output. Caveat, stated in the
-report: once the FSM acts on a suspicion it changes the flight, which replay
+report: once the recovery controller acts on a suspicion it changes the flight, which replay
 cannot show; the detection thresholds only decide *when* it acts.
 The selection rules are written in configs/rl/fsm_v1.yaml.
 """
@@ -100,9 +100,9 @@ def score_detection(episodes, traces, config) -> dict:
 
 
 def healthy_runs_s(p_fault: np.ndarray, t_s: np.ndarray, threshold: float) -> list[float]:
-    """Durations of the runs of p_fault >= threshold as the FSM sees them
+    """Durations of the runs of p_fault >= threshold as the recovery controller sees them
     (5 Hz decisions): first to last decision of each run, so a single-decision
-    spike is 0 s. The FSM confirms when a run's duration reaches its hold."""
+    spike is 0 s. The controller confirms when a run's duration reaches its hold."""
     out, start, last = [], None, None
     for i in range(0, len(p_fault), DECISION_STRIDE):
         if p_fault[i] >= threshold:

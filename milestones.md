@@ -2506,8 +2506,9 @@ whole comparison; reviewers see through it immediately.
 
 **Key deliverables:**
 - The shared policy interface (`rl/policies/base_policy.py`) comes **first** —
-  both the FSM and the eventual RL policy implement it, so M10's comparison
-  can't be skewed by the RL policy quietly having powers the FSM lacks.
+  both the rule-based recovery controller and the eventual learned policy
+  implement it, so M10's comparison can't be skewed by the learned policy
+  quietly having powers the rule-based controller lacks.
 - A `NORMAL → SUSPECTED → CONFIRMED → RECOVERING → LANDED/ABORTED` state
   machine with hysteresis (a flickering detector must not cause mode thrash),
   and thresholds tuned via a documented, archived sweep.
@@ -2573,10 +2574,10 @@ happens *after* onset:
   neither. Frozen before any tuning run.
 - **What a policy sees** — one `PolicyInput` per 5 Hz decision: the
   observation_v1 features, the detector's `DetectorOutput`, and mission
-  progress (waypoint index, distance to it, altitude). The FSM and M9's RL
+  progress (waypoint index, distance to it, altitude). The rule-based controller and M9's learned
   policy receive exactly this and return exactly an `action_v1` action. M9
   freezes the flat vector layout; M8 fixes the content.
-- **FSM tuning is split** so the expensive part stays small. The *detection*
+- **Tuning the rule-based controller is split** so the expensive part stays small. The *detection*
   side (suspect threshold, confirmation hold) is tuned offline by replaying
   detector traces over M7's **validation** episodes. Every M7 healthy false
   alarm lasted ≤ 0.9 s, so the hold should come out longer than that. The
@@ -2612,7 +2613,7 @@ happens *after* onset:
    from touchdown speed and tilt. A slow sink onto the ground is a
    `safe_landing`. Schema v5 adds `ground_contact` / `recovery_landed`,
    policy provenance (policy name, config, action-spec and detector
-   digests) per episode, and per step the flight phase, action, FSM state
+   digests) per episode, and per step the flight phase, action, controller state
    and detector output. Landings are now recorded step by step, since
    touchdown is what the crash rule judges. RMSE still counts
    mission-phase steps only, so it stays comparable with M3/M6.
@@ -2637,11 +2638,11 @@ happens *after* onset:
    after 11 and 15 s of flight, instead of a 60 s hang. `sim_stop` left 0
    processes. `tests/sim/test_policy_flight.py` passed on 2 concurrent
    workers: nominal flight completed and was classified `mission_success`;
-   the FSM against s = 0.6 committed to land 1.25 s after onset and still
+   the recovery controller against s = 0.6 committed to land 1.25 s after onset and still
    touched down at 5.4 m/s (a crash — above s ≈ 0.5, as expected).
    12 tests in `tests/test_policy_driver.py`, 2 new in
    `tests/test_arming_sequence.py`.
-4. ✅ **The FSM** — `rl/policies/rule_based.py`, `configs/rl/fsm_v1.yaml`, and
+4. ✅ **The rule-based recovery controller** — `rl/policies/rule_based.py`, `configs/rl/fsm_v1.yaml`, and
    the offline detection-side tuning on M7's validation split.
    **Done 2026-09-23.** States NORMAL → SUSPECTED → RECOVERING (continue,
    degraded) or ABORTED (land). planning.md's CONFIRMED is the transition
@@ -2709,8 +2710,8 @@ tests/test_recovery_outcome.py      crash / safe_landing / success / incomplete 
 tests/test_rule_based_policy.py     hysteresis (flicker does not thrash), ≤0.9 s alarm never confirms,
                                     CONFIRMED latches, severity -> response table, land is irreversible
 tests/test_policy_driver.py         5 Hz sim-time cadence, land latch, row annotation, no ground truth
-tests/test_recovery_tools.py        schedule, FSM replay, detection + response selection rules
-tests/sim/test_policy_flight.py     2 workers: nominal flight matches M6; FSM lands on an injected fault
+tests/test_recovery_tools.py        schedule, controller replay, detection + response selection rules
+tests/sim/test_policy_flight.py     2 workers: nominal flight matches M6; controller lands on an injected fault
 ```
 
 ### Done when
@@ -2761,6 +2762,106 @@ would then be measuring the modelling error rather than the simulator gap.
 this side the true severity is simply a variable in scope, so a stray reference
 puts ground truth into the observation with nothing to catch it. The
 observation must be assembled from the spec, never hand-packed.
+
+**Started 2026-09-24.** Plan reviewed and approved (full text:
+`~/.claude/plans/purring-greeting-bachman.md`; the essentials are below).
+
+### Design — approved 2026-09-24
+
+- **The same x500 model as Gazebo**, imported into Isaac Lab from PX4's
+  pinned `x500_base/model.sdf` (5 bodies: frame plus 4 propellers, box
+  collision shapes including legs and skids). Masses, inertias and rotor
+  positions are read from PX4's file, never retyped. The user asked for this
+  over a plain box; the legs decide tip-over at touchdown, which the crash
+  rule judges.
+- **Rotor model copied from Gazebo's:** speed = 150 + 850 × command,
+  thrust = 8.54858e-6 × speed², first-order motor lag. The fault scales the
+  commanded speed by √(1 − s), exactly as the Gazebo plugin does.
+- **PyTorch port of PX4's flight controller** with PX4 v1.17 default gains,
+  including its motor-saturation handling. When motors saturate it cuts
+  total thrust first, then roll and pitch, and handles yaw last. That
+  handling decides how a weak-rotor drone comes down. Hover-thrust estimation
+  and state estimation are added only if the agreement check needs them.
+- **Timing:** 200 physics steps per second, one decision per 0.2 s, asserted
+  equal to `action_v1.yaml`.
+- **Simulated detector fitted to live data**, including M8's finding that a
+  recovery descent makes the severity estimate over-read for ~3 s. Fitted on
+  the PX4 side into `configs/rl/detector_sim_v1.yaml`, with M8's validation
+  run held out.
+- **Observation contract v2** (27 values: 13 features, detector output,
+  mission progress, previous action). Each side builds it independently,
+  held together by a shared fixture file recorded from the PX4-side code,
+  not by shared imports.
+- **No reward yet** (M9 freezes it).
+
+### Tasks
+
+1. ✅ Contracts and scaffolding: `observation_v2.yaml`, flatten function and
+   `previous_action` on the PX4 side, the shared fixture file, an Isaac
+   activation script (sets the licence-acceptance variable found in M3b).
+   **Done 2026-09-24.** `experiments/write_isaac_fixtures.py` records action
+   decoding, three mission-tracker trajectories, 23 outcome cases and 12
+   observation vectors from the PX4-side code into
+   `tests/fixtures/isaac_contract_v1.json` (182 KiB). Inputs are seeded and
+   synthetic, so the file regenerates identically; a PX4-side test fails if
+   it is stale. `scripts/activate_isaac.sh` also strips ROS's Python 3.10
+   paths, which this machine's `~/.bashrc` puts into every shell.
+   Tests: `tests/test_observation_v2.py`, plus additions to
+   `test_policy_driver.py` and `test_fault_fields_not_in_observation.py`.
+2. ✅ Pure-PyTorch contract pieces (mission tracker, outcome, observation,
+   frames), checked against the fixture.
+   **Done 2026-09-24.** `isaac/aero_isaac/{contracts,mission,outcome,observation,frames}.py`.
+   46 tests in `isaac/tests/` (about 2 s, no simulator) reproduce every
+   recorded case: the vectorised mission tracker matches step for step over
+   the full mission, and the outcome rule matches in streaming form. The
+   observation builder rejects any block other than the four observable
+   ones. A static scan enforces that nothing under `isaac/` imports the PX4
+   side. Run with `source scripts/activate_isaac.sh && python -m pytest isaac/tests -m "not isaac"`.
+3. ✅ Vehicle model in PyTorch: rotor + fault (checked against M6's fixture),
+   allocation with saturation handling, cascaded controller.
+   **Done 2026-09-24.**
+   - `isaac/aero_isaac/px4_model.py` reads every vehicle and controller
+     number from the files PX4 flies with, never retyped: PX4's `x500_base`
+     model file for bodies and masses, our `x500_aero` model file for motor
+     parameters and the rotor-to-motor mapping, and the airframe plus
+     parameter defaults in the pinned source for gains. Total mass 2.0643 kg.
+   - `rotor.py` copies Gazebo's motor model; Gazebo 8's source was checked,
+     and it does not scale thrust with airflow along the rotor axis.
+   - `controller.py` ports PX4's position, velocity, attitude and rate
+     control and its allocation with saturation handling, from the named
+     source files.
+   - **Change from the plan:** physics at 250 steps per second, not 200,
+     because that is Gazebo's own step (`default.sdf`, 0.004 s).
+   - Closed loop on a test-only rigid body, with nothing tuned: hover at the
+     model's hover command (0.729; PX4's M6 median 0.736). A 15 m leg peaks
+     at 9.49 m/s and 44.1° tilt (M6: ~9.0 m/s, 44°). With one weak rotor
+     the drone holds altitude at s = 0.30 and 0.35 and comes down at 0.55:
+     the s ≈ 0.41 cliff, from physics plus PX4's saturation handling.
+   - Tests: 25 in `isaac/tests/test_rotor.py` and `test_controller.py`, with
+     the fault checked against M6's plugin fixture at three commands. The
+     closed-loop ones are marked slow (~45 s).
+4. ✅ The Isaac Lab environment with the imported x500, sensors, faults,
+   landing, terminations; headless smoke test; throughput at 8,192 drones.
+   **Done 2026-09-24.** `isaac/aero_isaac/env.py`, `probe.py`. Smoke test
+   `isaac/tests/test_env.py` (16 drones, ~5 min, marked `isaac`).
+   Throughput is limited by fixed per-step cost, not drone count: 8,688
+   decisions per second at 8,192 drones, 16,342 at 16,384, 24,297 at 32,768
+   (4.6 of 8.2 GB graphics-card memory, 7.4 GB computer memory). Clip in the
+   README. Detail: `docs/isaac_env.md`.
+5. ✅ Closed-loop agreement with PX4. Gates written before measuring.
+   **Done 2026-09-24.** All 16 gates pass for "no recovery" and "slow and
+   low". The one first-attempt failure (slow-and-low mission time) was PX4's
+   takeoff sequence, then ported. PX4's hover-thrust and state estimators
+   were not needed.
+6. ✅ Simulated detector: fit, PyTorch implementation, held-out check, and a
+   test that the true fault state cannot reach the observation.
+   **Done 2026-09-24.** Fitted only on flights the detector never trained
+   on. After four revisions against M8's validation run, the model was
+   frozen and checked once on a fresh 144-flight run (seed 8501): 13 of 14
+   checks pass. **Known gap:** ramps at severity 0.5–0.7 are detected
+   0.58 s late in the simulator (1.70 against 1.12 s). It is recorded as an
+   expected failure (user decision), not tuned away. The leak check passes.
+   Full history: `docs/isaac_env.md`.
 
 ---
 
@@ -2832,6 +2933,15 @@ tables.
   in RL papers.
 - All figures generated by script, never hand-edited; the runner must resume a
   partial run without re-running or double-counting finished cells.
+- **A short trial run before the full sweep** (about 1 to 1.5 hours): one
+  trained policy, conditions C2, C3 and C4, severities 0.4, 0.6 and 1.0, about
+  15 flights each (135 flights on 2 workers). Check timeouts and restarts,
+  whether crash and touchdown counts look sensible, the policy's PX4 score
+  against its Isaac score, and the real minutes per flight to budget the full
+  sweep. The trial uses **different random seeds** from the full sweep, so
+  anything adjusted after seeing it cannot bias the reported numbers. With 15
+  flights per cell the result says "clearly works, clearly broken, or unclear"
+  and is never reported as a result.
 
 **Why C5/C6 matter:** C5 vs C4 separates "the detector is imperfect" from "the
 policy is imperfect" — the question every reviewer asks first. Excluded/invalid
@@ -2959,7 +3069,7 @@ Update this as milestones complete.
 | M6 | **Done** | 2026-09-23 | Was M5. `RotorDegradationSystem` plugin (scales thrust and reaction torque together), `x500_aero` model, `RotorFaultController`, fault integration in `EpisodeRunner`/`SimFarm`, thrust cross-validation fixture, episode schema v4. **Dataset `results/m6_dataset_v1/`: 750/750 episodes, 741 valid**, 2 workers × 1×, resumed twice via `--resume` with no episodes lost. Headline finding: PX4's own `FailureDetector` stays silent in 100% of faulty episodes at severity [0.2, 0.4) and 63% at [0.8, 1.0]. Full analysis: `docs/fault_dataset.md`. |
 | M7 | **Done** | 2026-09-23 | Was M6. Rotor-symmetric streaming GRU, 5-member ensemble (user-chosen over a 1D-CNN). On the test flights it detects weak faults (s 0.2–0.4) in a median 0.88 s vs the random forest's 1.18 s, identifies the rotor 98.6–99.8% of the time, and estimates severity with MAE ≤ 0.022. ECE is 0.004 and uncertainty→error AUROC 0.91. Tick AUROC ties the random forest; the model loses on false alarms (6 vs 4 short events in 0.69 h). Verified live on 2 concurrent workers (right rotor, ~0.55 s delay, p99 tick ≤ 10.7 ms), after fixing a real live-latency overshoot (p99 34.5 ms → stacked-weights streaming path). `error_model.json` written for M8b. Full results: `docs/detector_results.md`. |
 | M8 | **Done** | 2026-09-23 | Was M7. Physics limit: hover is impossible above rotor severity ≈ 0.41, so recovery can matter only for s ≈ 0.35–0.45. Built the 3-dimension action spec, the outcome rule (crash = tilt > 60° or touchdown > 2.0 m/s), the moving-setpoint mission tracker, policy-driven flight with ground-contact termination (episode schema v5), and the rule-based recovery controller, tuned offline then on the simulator. **Validation: the controller does not beat flying with no recovery.** It never landed a healthy drone, but its own recovery descent makes the detector over-read severity and trigger needless landings. Full results: `docs/recovery_baseline.md`. |
-| M8b | Not started | | **New milestone (D12)**: Isaac Lab training environment. Depends on M3b, M5, M6, M7. |
+| M8b | **Done** | 2026-09-24 | Isaac Lab training environment: PX4's x500 imported, PX4's flight controller ported to PyTorch, all 16 closed-loop agreement gates with PX4 pass. Simulated detector fitted to flights the detector never trained on; fresh confirmation run passes 13 of 14 checks, the miss (ramps at 0.5–0.7 detected 0.58 s late) recorded as a known gap. Up to 32,768 drones on one graphics card. Full results: `docs/isaac_env.md`. |
 | M9 | Not started | | Was M8. Rescoped by D12: trains in Isaac, evaluates on PX4, adds the RQ5 transfer table. |
 | M10 | Not started | | Was M9. |
 | M11 | Not started | | Was M10. |
