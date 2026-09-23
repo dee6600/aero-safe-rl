@@ -2,11 +2,12 @@
 
 **Planning document — roadmap only. No implementation.**
 
-Status: Phases 0–1, 1b and 3 done; Phase 2 substantially done with one open
-reliability item (`docs/parallelism.md` §2.6). Phase 3b done (Isaac Lab
-feasibility, passed). Phase 4 tasks 1–3 done (`EpisodeRunner`,
-`WorkerSupervisor`, `SimFarm`, verified against 2 concurrent real workers);
-tasks 4–8 remain — see `milestones.md` M4.
+Status: Phases 0–1, 1b, 3, 3b, 4, 5 and 6 done; Phase 2 substantially done with
+one open reliability item (`docs/parallelism.md` §2.6). Phase 4's evaluation
+farm passed a 400-episode soak at 2 workers (`docs/throughput.md`); Phase 6
+delivered the 750-episode labelled fault dataset (`docs/fault_dataset.md`).
+Next: Phase 7 (AI fault detection). An active-fault-diagnosis extension was
+proposed and deferred until after the MVP (`docs/change_active_diagnosis.md`).
 
 **Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
 GPU-parallel **NVIDIA Isaac Lab** environment; PX4-in-the-loop (Gazebo) remains
@@ -26,7 +27,7 @@ Evidence: `docs/parallelism.md`. Coding rules: `CLAUDE.md`.
 
 Companion documents: `milestones.md` (build order), `CLAUDE.md` (coding rules),
 `docs/parallelism.md` (verified multi-instance behaviour).
-Last updated: 2026-09-21
+Last updated: 2026-09-23
 
 ---
 
@@ -1179,8 +1180,8 @@ aero-safe-rl/
 
 ## 13. Immediate next steps
 
-Phases 0 and 1 are complete. Phase 2 is in progress. The 2026-08-20 review
-opened work that must land before Phase 2 can be closed.
+The list below is the original Phase 0–1 setup log, kept as a record. Current
+work is under **Open now**.
 
 1. ✅ **Decisions D1–D6 resolved** (§14) — all approved. *(D5 and D6 were later superseded by D12 on 2026-09-21.)*
 2. ✅ **Repo renamed and initialised** (`aero-safe-rf` → `aero-safe-rl`), `git init` done.
@@ -1196,26 +1197,16 @@ opened work that must land before Phase 2 can be closed.
 
 ### Open now, in order
 
-Items 1–5 of the previous list are **done** (pytest/pyarrow, Phase 1b, both
-`px4_interface.py` multi-instance bugs, Phase 2's helpers, Phase 3). What
-remains:
+Phases 3b, 4, 5 and 6 are **done** (see `milestones.md`'s progress log). What
+remains for the MVP:
 
-1. **Reboot** to clear the NVIDIA kernel-module / NVML version mismatch
-   (580.173.02 vs 580.178). Until this is done `nvidia-smi` fails,
-   `torch.cuda.is_available()` is `False`, and nothing Isaac-related can be
-   attempted or measured.
-2. **Phase 3b — Isaac Lab feasibility spike.** Install Isaac Lab into the
-   existing `isaacsim` env, run one stock quadrotor task headless, and measure
-   the env-count / steps-per-second / VRAM table. Write
-   `docs/isaac_feasibility.md`. **This gates D12** — if it fails, decide
-   between a cloud GPU and reverting to PX4-in-the-loop training *now*, not at
-   Phase 9.
-3. **Phase 4** — the parallel simulation farm, now scoped as an *evaluation*
-   farm (see that phase's rescope note), plus its throughput table.
-4. **Phases 5 → 8** unchanged: feature pipeline, fault injection and dataset,
-   detector, rule-based baseline.
-5. **Phase 8b** — the Isaac Lab training environment, which cannot be finished
+1. **Phase 7** — the AI fault detector, trained on `results/m6_dataset_v1/`.
+   It also supplies the measured error model Phase 8b needs.
+2. **Phase 8** — the rule-based recovery baseline.
+3. **Phase 8b** — the Isaac Lab training environment, which cannot be finished
    before Phase 7 supplies the detector error model it must simulate.
+4. **Phases 9 → 10** — RL training in Isaac, evaluation on PX4, full
+   experiments.
 
 **Do not start Phase 8b or 9 until `docs/isaac_feasibility.md` exists and says
 the sample budget is reachable.** The old gate on `docs/throughput.md` now

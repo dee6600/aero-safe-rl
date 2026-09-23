@@ -1,6 +1,17 @@
 # Change proposal — active fault diagnosis and belief-driven recovery
 
-**Status: proposal, not approved. Date: 2026-09-22.**
+**Status: DEFERRED until after the MVP (decided 2026-09-23).** Nothing in this
+document is part of the current plan, including Part A. The project finishes
+its MVP first (M7–M10 as already planned in `milestones.md`); this proposal is
+kept as the starting point for a future update. When it is picked up, re-check
+it against the repository first, since it describes the state as of 2026-09-23.
+
+**Original status: proposal, not approved. Date: 2026-09-22. Revised 2026-09-23** after
+checking it against the repository: M5 is committed, the M6 plugin exists and
+already couples torque to thrust, and the 750-episode M6 dataset
+(`results/m6_dataset_v1/`) is delivered without probes. The revision corrects
+the parts written against the older state, fixes three technical claims, and
+splits adoption into two parts (§0.1).
 Companion to `planning.md` (§2, §3.1, §6, §7.2, §8, §9, appendix), `milestones.md`
 (M5, M6, M7, **M7b new**, M8b, M9, M10) and `CLAUDE.md` (§1).
 
@@ -18,11 +29,15 @@ stands: training in Isaac, evaluation on PX4.
 **Nothing already measured is invalidated.** The M3 noise floor, the divergence
 band, the M3b Isaac feasibility numbers and the M4 throughput table all survive.
 
-**One bookkeeping note before anything else:** `README.md` and `planning.md` §0
-still say "M4 tasks 4–8 remain", but commit `35b2fba` ("M4 (tasks 4-8): failure
-handling, run manifest, throughput, soak test") appears to land them. Reconcile
-the status blocks before adding the sections below, or the change history stops
-being trustworthy.
+**One bookkeeping note before anything else** *(resolved 2026-09-23 — all three
+status blocks now reflect M4–M6 as done)*: the status blocks were stale in
+three places. `planning.md` §0 still says "M4 tasks 4–8 remain" and `README.md`
+still says "M4 tasks 1-3 done, 4-8 remaining", although commit `35b2fba` landed
+them and `milestones.md`'s own progress log marks M4 done. That progress log and
+`README.md` also list M5 and M6 as "Not started", although M5 is committed
+(`b999e82`) and M6's dataset is delivered (`docs/fault_dataset.md`). Reconcile
+all three before adding the sections below, or the change history stops being
+trustworthy.
 
 ---
 
@@ -39,12 +54,29 @@ being trustworthy.
    runs on both sides (D14). A fixed noise model cannot represent "information
    depends on what you do", and a stub that *does* model that effect explicitly
    would make RQ6 circular.
-4. **A kill-test is inserted before any of it is built** (M7b). It uses a
-   scripted probe and the offline detector — no RL, no Isaac — and answers in
-   two days whether the physics this idea rests on is real on the PX4 stack.
+4. **A kill-test is inserted before any of it is built** (M7b), in two stages.
+   Stage 0 flies scripted probes with the existing plugin and compares raw
+   telemetry — no new detector, no dataset rerun, about one day. Only if that
+   shows an effect does stage 1 repeat it with the belief-output detector.
 
 M5 already anticipated most of part 3: the shared / PX4-only feature split it
 defines is exactly the boundary the portable detector lives inside.
+
+### 0.1 Adoption in two parts
+
+**Part A — adopt now.** Cheap, and useful whether or not probing works:
+
+- the RQ3 sharpening (§1);
+- D15, the calibrated belief head, built as part of M7, with the matched-AUC
+  detector variants it makes possible (§9, M7 addendum);
+- recording the yaw-rate response in the M6 fault fixture, so the Isaac-side
+  model must match it as well as the thrust curve (§2, D2 note);
+- the status-block fixes above.
+
+**Part B — adopt only if M7b stage 0 passes.** RQ6, D13, D14, D14a, D16, the
+probe channel, the probe dataset run, C7–C9, schema v3 and the two new
+`CLAUDE.md` rules. Until then these sections stay a proposal. D14 also needs
+the environment-boundary question in §3.2 settled before it is adopted.
 
 ---
 
@@ -126,25 +158,29 @@ and hard to defend. The defensible contribution is at a **different layer**:
 | **D14** | **Two detectors, one interface.** `detector_px4_v1` (all M5 features, PX4 side only) is the RQ1 result. `detector_portable_v1` (shared features only) is what the *policy* consumes, and it runs on **both** sides. This replaces M8b's synthetic detector-output simulator as the reported configuration. The synthetic stub survives only as a training-side sanity check (D14a) and never produces a reported number. |
 | **D14a** | The synthetic detector-output simulator is demoted to **one purpose**: confirming that PPO can learn to probe *at all*, in an environment where the benefit of probing is explicitly modelled. It is a check on the RL setup, run before the real thing is built. A result produced with it is circular by construction and is never reported. |
 | **D15** | **The detector outputs a belief, not a point estimate.** A posterior over `K = 9` classes — healthy, plus eight severity bins over (0.1, 0.9] — calibrated by temperature scaling on a held-out split, with ECE reported. Entropy, NLL and Brier score all derive from it. The policy observes the belief; `p(fault)` and the severity estimate become derived quantities rather than the primary interface. |
-| **D16** | **The information reward is a proper scoring rule, not entropy.** Rewarding entropy reduction pays the policy for becoming confident, including confidently wrong. The shaping term is the change in the log-score of the *true* class under the belief, which pays only for becoming correctly confident. Ground truth enters the reward only — never the observation (`CLAUDE.md` §1.7) — and the term is potential-based, so it cannot change the optimal policy of the underlying mission reward. |
+| **D16** | **The information reward is a proper scoring rule, not entropy.** Rewarding entropy reduction pays the policy for becoming confident, including confidently wrong. The shaping term is the change in the score of the *true* class under the belief, which pays only for becoming correctly confident. Ground truth enters the reward only — never the observation (`CLAUDE.md` §1.7). The term is potential-based and **unclipped**, so it cannot change the optimal policy of the underlying mission reward (§5 explains what that implies). |
 
-### Note on D2 — refinement 2026-09-22 (torque coupling)
+**Adoption:** D15 is Part A (§0.1). D13, D14, D14a and D16 are Part B and are
+appended to `planning.md` §14 only if M7b stage 0 passes.
 
-The degradation plugin must scale the rotor's **reaction torque as well as its
-thrust**, with the ratio configurable, and the Isaac-side model must do the same.
+### Note on D2 — torque coupling (checked 2026-09-23)
 
-This is not a detail. A quadrotor's yaw authority comes from the differential
-drag torque of its two rotor pairs. If the plugin scales thrust alone, the
-allocator compensates the thrust loss and the vehicle's yaw behaviour stays
-almost exactly nominal — which is both physically wrong and, specifically, the
-place where most of the diagnostic information lives. A thrust-only fault model
-would make RQ6 untestable while looking like a negative result.
+The yaw signature depends on the fault weakening the rotor's **reaction torque
+as well as its thrust**, and the Isaac-side model must do the same.
 
-`configs/faults/*.yaml` therefore carries `thrust_factor` and `torque_factor`,
-defaulting to equal (proportional degradation, e.g. blade damage), with the
-decoupled case available for later fault types (e.g. ESC derating, bearing wear).
-The `CLAUDE.md` §1.6 cross-validation fixture records **both** the thrust
-reduction and the yaw-rate step response, on both sides.
+**The M6 plugin already does this.** `RotorDegradationSystem.cc` scales the
+faulted rotor's commanded velocity by `sqrt(1 − s)`. In the stock gz motor
+model thrust goes with velocity² and reaction torque with thrust (via
+`momentConstant`), so both scale by exactly `1 − s`. No plugin change and no
+new config field is needed.
+
+A configurable `torque_factor` is **not** added. It would only serve fault
+types (ESC derating, bearing wear) that nothing in the plan calls for. If one
+is ever added, add the field then (see the project's keep-it-simple rule).
+
+What *does* change: the `CLAUDE.md` §1.6 cross-validation fixture records the
+**yaw-rate response to a commanded yaw doublet** as well as the thrust
+reduction, so the Isaac-side model is held to both. This is Part A.
 
 ---
 
@@ -197,6 +233,27 @@ result — is not cheaper, it is just quieter.
 the policy still never sees ground truth on either side. The belief is a model
 output in both environments, which is strictly *more* faithful than the stub was.
 
+**Two problems to settle before D14 is adopted.**
+
+1. **It needs a second implementation of feature extraction.** The detector in
+   Isaac needs the M5 features computed from batched GPU tensors. The existing
+   extractor (`ai/features/feature_extractor.py`) works on PX4 episode records
+   in the `aero-safe-rl` env and cannot be imported across the boundary
+   (`CLAUDE.md` §0.1). An Isaac-side extractor is therefore a second
+   implementation, which `CLAUDE.md` §1.4 forbids unless sanctioned. Adopting
+   D14 means adding it as a second sanctioned exception beside the fault model,
+   paid for the same way: a test asserting that both extractors produce
+   matching features from a recorded fixture.
+2. **"Commanded" means different things on each side.** On PX4, the command
+   behind any "commanded vs achieved" residual comes from PX4's own position
+   and rate controllers. In Isaac it comes from the geometric stand-in
+   controller. The same residual name would measure two different
+   controllers, which puts a controller gap inside the belief. Portable
+   features must use quantities that mean the same thing on both sides: raw
+   vehicle state, or residuals against the **policy-level** setpoint (the one
+   input both sides share by construction), never against an inner-loop
+   command.
+
 ---
 
 ## 4. `planning.md` §6 addendum — fault model
@@ -205,20 +262,28 @@ Add after the D2 note:
 
 ---
 
-**Torque coupling (refinement to D2, 2026-09-22).** Every fault specification
-carries `thrust_factor` and `torque_factor`. v1 sets them equal. The plugin's
-status echo reports both as applied. The M6 validation gains one assertion: at
-`s = 0.3` on rotor `i`, a commanded yaw-rate doublet produces a **measurably
-asymmetric** yaw-rate response between the two directions, exceeding the M3 noise
-floor. If it does not, either the torque scaling is not reaching the physics or
-the severity is not being applied — both of which are silent failures that would
-otherwise surface as a null result three milestones later.
+**Torque coupling (D2, checked 2026-09-23).** Already satisfied by the plugin
+(see the D2 note in §2). The M6 validation gains one assertion: at `s = 0.3` on
+rotor `i`, a commanded yaw-rate doublet produces a yaw response that **differs
+from the healthy response** by more than the M3 noise floor. Expect the
+difference to show as a weaker yaw response overall and as yaw leaking into
+roll and pitch (the weak rotor delivers less than its share of a yaw
+manoeuvre). **Do not assert that the +/− directions respond differently.**
+Thrust and torque fall together, so for small doublets the response is close to
+symmetric. It only becomes lopsided near motor saturation, so that assertion
+could fail on a correct plugin. If the healthy-vs-faulty difference is missing,
+either the severity is not reaching the physics or the doublet is too small.
 
-**Dataset composition (new).** 30–40% of the M6 dataset's episodes must contain
-scripted probe maneuvers at randomised times, in both healthy and faulty
-episodes. Without them the detector sees probe telemetry for the first time at
-evaluation, out of distribution, at exactly the moment it is supposed to be most
-informative — and the resulting failure looks like "probing doesn't help".
+**Dataset composition (Part B).** The delivered M6 dataset
+(`results/m6_dataset_v1/`, 750 episodes) has no probes and **is not
+regenerated**. If M7b stage 0 passes, a **supplementary** run
+(`results/m6_probe_v1/`, same fault config, same farm) adds episodes with
+scripted probes at randomised times, healthy and faulty, so that probe episodes
+make up 30–40% of the combined set. Without them the detector sees probe
+telemetry for the first time at evaluation, out of distribution, at exactly the
+moment it is supposed to be most informative — and the resulting failure looks
+like "probing doesn't help". Budget the run from `docs/fault_dataset.md`: the
+750-episode run took several sessions at 2 workers × 1×.
 
 ---
 
@@ -263,14 +328,23 @@ auditable, which a policy-synthesised excitation is not.
 
 | Primitive | Command | Rationale |
 |---|---|---|
-| `yaw_doublet` (**v1**) | yaw-rate setpoint `+ω_p` then `−ω_p`, `T_p/2` each, position setpoint held | a degraded rotor changes the differential drag torque, so yaw authority becomes asymmetric; the vehicle does not translate, so the probe is cheap and does not risk a position excursion |
+| `yaw_doublet` (**v1**) | yaw-rate setpoint `+ω_p` then `−ω_p`, `T_p/2` each, position setpoint held | a degraded rotor delivers less than its share of the yaw torque, so yaw response weakens and leaks into roll/pitch (§4); the vehicle does not translate, so the probe is cheap and does not risk a position excursion |
 | `climb_pulse` (deferred to M11) | vertical velocity `+v_p` for `T_p`, then return | exposes the reduced thrust ceiling; costs altitude and energy, so it is an ablation, not v1 |
 
 Defaults: `ω_p ∈ [0.2, 0.6] rad/s` scaled by action 7, `T_p = 1.2 s`,
 `N_max = 6` probes/episode, refractory `t_ref = 3 s`.
 
-**The probe guard.** One implementation, in the shared command-mapping layer,
-used by the FSM and the RL policy and identical in both environments. A probe is
+**Flight-code prerequisite.** Nothing in `aero_bridge` sends a yaw-rate setpoint
+today. The doublet needs `PX4Interface` to publish `TrajectorySetpoint.yawspeed`
+while holding position. This is also the first thing M7b stage 0 needs.
+
+**The probe guard.** One rule set, in the shared command-mapping layer, used by
+the FSM and the RL policy and identical in both environments. The boundary
+(`CLAUDE.md` §0.1) means "identical" cannot be "one module imported by both
+sides": the PX4 side runs it per vehicle in the `aero-safe-rl` env, the Isaac
+side batched over tensors in the `isaacsim` env. It is therefore defined by
+`configs/rl/probe_v1.yaml` (thresholds) plus a shared table of recorded
+states → verdicts that **both** implementations are tested against. A probe is
 refused when any of the following holds: altitude AGL below `h_min`; attitude
 error or body rate above threshold; horizontal geofence margin below `d_min`;
 battery below threshold; within the refractory window; budget exhausted;
@@ -293,13 +367,22 @@ shows selectivity was learned rather than imposed.
 - **Safe-landing partial credit**
 - **`+r_info` — belief shaping (D16).** With `Φ_t = log b_t[k*]`, the log-score of
   the true severity class under the current belief, the term is
-  `r_info,t = β · (γ Φ_{t+1} − Φ_t)`, clipped. This is potential-based, so it
-  provably leaves the optimal policy of the rest of the reward unchanged; it
-  shapes exploration toward informative behaviour without redefining the task.
-  Brier score is the bounded alternative if log-score proves unstable near
-  `b[k*] → 0`; whichever is used, it is a **proper scoring rule over the true
-  class**, never the belief's entropy. Entropy alone pays for confidence, and the
-  cheapest way to buy confidence is to be wrong about it.
+  `r_info,t = β · (γ Φ_{t+1} − Φ_t)`, with `Φ = 0` at episode end. This is
+  potential-based, so it provably leaves the optimal policy of the rest of the
+  reward unchanged. **Do not clip it**: clipping breaks the potential-based
+  form and with it that guarantee. If log-score is unstable near `b[k*] → 0`,
+  switch to Brier score, which is bounded, rather than clipping. Whichever is
+  used, it is a **proper scoring rule over the true class**, never the belief's
+  entropy. Entropy alone pays for confidence, and the cheapest way to buy
+  confidence is to be wrong about it.
+
+  **What this term can and cannot do.** Because it cannot change the optimal
+  policy, it cannot by itself make probing worthwhile. It only helps the
+  learner find informative behaviour sooner. Probing is worth doing only if a
+  better belief leads to better mission outcomes under the rest of the reward.
+  That is the claim RQ6 tests. If the policy probes only because `r_info` pays
+  for it, the term is doing something it provably cannot do in the limit, and
+  the probing will fade with more training.
 - **`−λ_probe` per probe initiated.** Small and explicit, so the mission cost of
   probing appears in the reward decomposition rather than only in the tracking
   error it happens to cause.
@@ -360,28 +443,38 @@ New group, **Active diagnosis**:
 |---|---|---|
 | Information reward is hacked — policy becomes confidently wrong | **High** | D16: proper scoring rule over the true class, not entropy; `r_info` logged separately; belief calibration (ECE) reported per condition |
 | Circular RQ6 result from an explicitly-modelled information stub | **High** | D14a: the stub is a sanity check on the RL setup only and never produces a reported number; every reported probing result uses a real detector in the loop |
-| Thrust-only fault model erases the yaw signature | **High** | D2 refinement: `torque_factor` in the plugin and the Isaac model; M6 asserts asymmetric yaw-rate response at `s = 0.3`; the fixture records both sides |
+| Isaac-side rotor model scales thrust but not torque, erasing the yaw signature on the training side only | **High** | The Gazebo plugin already couples them (D2 note); the fixture records the yaw-doublet response, and M8b's §1.6 test holds the Isaac model to it as well as to the thrust curve |
+| Isaac-side feature extraction drifts from the PX4-side extractor | **High** | Sanctioned second implementation (§3.2) with a parity test on a recorded fixture, like §1.6; portable features restricted to quantities that mean the same on both sides |
 | Probing causes the very failure it is diagnosing | **High** | Probe guard outside the policy, bounded primitive amplitude, budget and refractory; probe-induced LOC rate reported as a first-class metric; `yaw_doublet` chosen partly because it holds position |
 | Detector is out-of-distribution during probes | **High** | M6 dataset contains scripted probes in 30–40% of episodes, healthy and faulty |
 | Two detectors widen the RQ5 gap and confound it | Medium | Oracle-belief row in the transfer table separates the dynamics gap from the detector gap |
 | Action space growth hurts the sample budget | Low | +2 dims on 5, and the probe dims are near-binary in effect; Isaac's throughput has the headroom M3b measured |
-| RQ6 turns out to be physically unavailable at sub-threshold severities | Medium | **M7b kills it in 2–3 days, before M8b or M9 depend on it.** The RQ3 sharpening costs nothing extra and survives on its own |
+| RQ6 turns out to be physically unavailable at sub-threshold severities | Medium | **M7b stage 0 kills it in about a day, before any Part B work is built.** The RQ3 sharpening costs nothing extra and survives on its own |
 
 ---
 
 ## 9. `milestones.md` changes
 
-### M5 — addendum
+### M5 — addendum (Part B; M5 is already committed)
 
-Three feature groups become **required and shared** (computable on both sides),
-because they are the ones a probe excites:
+M5 shipped `feature_version: "1"` with 13 shared features, all raw vehicle
+state, and no commanded quantities. `thrust_accel_residual` is **`px4_only`**,
+not shared. Adding features now means `feature_version: "2"` and recomputing
+`configs/rl/normalization_v1.yaml` as `normalization_v2.yaml`. That is allowed
+because no model has been trained on v1 yet (anti-pattern #11 applies only
+after training starts), but it is a version bump, not an in-place edit
+(`CLAUDE.md` §7).
 
-- commanded vs achieved **yaw rate** residual, and its asymmetry over the window
-  (signed, per direction);
-- commanded vs achieved **angular acceleration** per body axis;
-- commanded collective thrust vs achieved vertical acceleration (the existing
-  thrust-residual feature, confirmed present in the shared set, not the PX4-only
-  set).
+Candidate shared features, because they are the ones a probe excites. Per
+§3.2, residuals are taken against the **policy-level setpoint** both sides
+share, never against an inner-loop command:
+
+- achieved **yaw rate** against the probe's commanded yaw-rate profile during a
+  probe, and its per-window gain;
+- **angular acceleration** per body axis, including roll/pitch activity during
+  a yaw probe (the cross-axis leak described in §4);
+- vertical acceleration against the policy's climb-rate setpoint.
+  `thrust_accel_residual` stays `px4_only`.
 
 New test: everything `configs/ai/detector_portable_v1.yaml` references is marked
 shared in `configs/features.yaml` — the same test that already guards
@@ -389,23 +482,25 @@ shared in `configs/features.yaml` — the same test that already guards
 
 ### M6 — addendum
 
-- `thrust_factor` **and** `torque_factor` in the fault schema and the plugin's
-  status echo (D2 refinement).
-- Fixture records the yaw-rate step response as well as the thrust reduction, so
-  M8b has both to match.
-- 30–40% of dataset episodes carry scripted probes at randomised times, healthy
-  and faulty, with `probe_events` in the record.
-- Validation gains the asymmetric-yaw assertion at `s = 0.3`.
+- *(Part A)* Fixture records the yaw-doublet response as well as the thrust
+  reduction, so M8b has both to match. No schema or plugin change: torque is
+  already coupled (§2 D2 note).
+- *(Part A)* Validation gains the healthy-vs-faulty yaw-response assertion at
+  `s = 0.3` (§4), not an asymmetry assertion.
+- *(Part B)* The supplementary probe dataset run, with `probe_events` in the
+  record (§4). The delivered 750-episode dataset is kept as is.
 
 ### M7 — addendum
 
 - The model's head becomes a `K = 9` softmax over severity classes (D15), not a
   scalar plus a hand-made uncertainty proxy. Temperature-scaled on a held-out
   split; **ECE and a reliability diagram reported alongside AUC**.
-- Train **two** models from one training script and one architecture:
-  `detector_px4_v1` (all features — the RQ1 result) and `detector_portable_v1`
-  (shared features only — what the policy consumes). Report both; the gap between
-  them is itself informative about what the PX4-only features are worth.
+- *(Part B)* Train **two** models from one training script and one
+  architecture: `detector_px4_v1` (all features — the RQ1 result) and
+  `detector_portable_v1` (shared features only — what the policy consumes).
+  Report both; the gap between them is itself informative about what the
+  PX4-only features are worth. Under Part A alone, only `detector_px4_v1` is
+  trained, with the belief head.
 - The measured error model is still fitted, since D14a's sanity stub needs it.
 - **RQ3's detector variants are generated here, and cost almost nothing:**
   temperature scaling is monotonic, so a mis-scaled variant has **exactly the
@@ -417,38 +512,62 @@ shared in `configs/features.yaml` — the same test that already guards
 
 ### M7b — Probe observability spike  ⭐ new (gate for RQ6)
 
-**Goal:** answer, offline and without RL, whether a scripted probe actually makes
-a sub-threshold fault more observable **on the PX4 stack**. This is the physical
-assumption RQ6 rests on. Two to three days.
+**Goal:** answer, without RL, whether a scripted probe actually makes a
+sub-threshold fault more observable **on the PX4 stack**. This is the physical
+assumption RQ6 rests on. Two stages, cheapest first. All of Part B waits on
+stage 0.
 
-**Depends on:** M6 (probe-containing dataset), M7 (`detector_portable_v1`).
-**Blocks:** the RQ6 parts of M8b, M9, M10 — and nothing else.
+**Blocks:** every Part B item (§0.1) — and nothing else.
 
-**Key deliverables:**
-- A scripted `yaw_doublet` flown through `EpisodeRunner` at `s ∈ {0, 0.2, 0.3,
-  0.4}`, ≥30 episodes per cell, probe timing randomised, matched no-probe
-  control episodes at identical seeds.
+#### Stage 0 — raw-telemetry spike (about one day)
+
+**Depends on:** M6's existing plugin and farm only. No new detector, no dataset
+run, no feature-version bump.
+
+- Add yaw-rate setpoint support to `PX4Interface` (§5, flight-code
+  prerequisite).
+- Fly a scripted `yaw_doublet` through `EpisodeRunner` at `s ∈ {0, 0.2, 0.3}`,
+  ≥30 episodes per cell, at least two concurrent workers, probe timing
+  randomised, with matched no-probe control episodes at identical seeds.
+- Compare healthy vs faulty separability in the 2 s window after the probe
+  against the same window without one, using the existing M5 features plus the
+  roll/pitch activity during the doublet. A small classifier fitted per window
+  (e.g. logistic regression, cross-validated by episode) is enough. Report the
+  AUC gain with a 95% CI.
+
+**Pass:** the post-probe window separates healthy from faulty better than the
+no-probe window at `s = 0.2` **and** `s = 0.3`, with non-overlapping 95% CIs.
+Then Part B is adopted and stage 1 runs.
+
+**Kill:** no significant gain at any tested severity. Then RQ6 is dropped, D13
+is marked superseded, `action_v1` stays at 5 dims, and the project continues
+with Part A only, having spent about a day. **Write the negative result into
+`docs/probe_observability.md` anyway** — "the allocator masks it well enough
+that mission-level excitation buys nothing" is a genuine finding about PX4, and
+it belongs in the paper's discussion.
+
+#### Stage 1 — detector-level confirmation
+
+**Depends on:** stage 0 passed, the supplementary probe dataset (§4), M7's
+`detector_portable_v1`.
+
+- Rerun stage 0's protocol at `s ∈ {0, 0.2, 0.3, 0.4}`, scoring the belief
+  instead of the raw features.
 - One figure: belief NLL and severity MAE in the 2 s window after the probe,
   against the matched no-probe control.
-- `docs/probe_observability.md`, written like `docs/isaac_feasibility.md` — the
-  measurement, the method, and the verdict.
-
-**Done when** the effect is quantified with a confidence interval, whichever way
-it comes out.
 
 **Pass criterion:** at `s = 0.2` **and** `s = 0.3`, the post-probe belief NLL is
 lower than the matched control by a margin exceeding the M3 divergence band, with
 a non-overlapping 95% CI over ≥30 episodes.
 
-**Kill criterion:** no significant effect at any `s ≤ 0.4`. Then RQ6 is dropped,
-D13 is marked superseded, `action_v1` stays at 5 dims, and the project continues
-with RQ1–RQ5 plus the RQ3 sharpening, having spent three days instead of five
-weeks. **Write the negative result into `docs/probe_observability.md` anyway** —
-"the allocator masks it well enough that mission-level excitation buys nothing"
-is a genuine finding about PX4, and it belongs in the paper's discussion.
+**Watch out for:** running stage 1 with a detector trained on probe-free data.
+It will fail for the wrong reason. Check that the supplementary probe run went
+into the detector's training split first.
 
-**Watch out for:** running this with a detector trained on probe-free data. It
-will fail for the wrong reason. Check the M6 dataset composition first.
+**Deliverable for both stages:** `docs/probe_observability.md`, written like
+`docs/isaac_feasibility.md` — the measurement, the method, and the verdict.
+**Done when** the effect is quantified with a confidence interval, whichever way
+it comes out.
 
 ---
 
@@ -467,9 +586,12 @@ Split into two stages, cheapest first.
 - Isaac Lab quadrotor task, geometric position/velocity controller, 5 Hz.
 - Isaac-side rotor degradation model with **thrust and torque** scaling,
   cross-validated against M6's fixture on both quantities (`CLAUDE.md` §1.6).
-- Both probe primitives implemented against the same
-  `configs/rl/probe_v1.yaml`, and the **same probe guard module**, imported by
-  both sides — the guard is flight logic, not env-specific glue.
+- The v1 probe primitive implemented against the same
+  `configs/rl/probe_v1.yaml`, and the probe guard implemented batched for Isaac
+  and tested against the **same recorded states → verdicts table** as the PX4
+  side (§5). It cannot be one imported module across the boundary.
+- The Isaac-side feature extractor (§3.2), with its parity test against the
+  PX4-side extractor on a recorded fixture.
 - One shared test asserting both environments match `observation_v1.yaml` and
   `action_v1.yaml`.
 - **D14a sanity check:** a short PPO run against the synthetic
@@ -532,10 +654,15 @@ ground-truth access in one clearly named function.
 
 ### `CLAUDE.md` — additions to §1
 
-- **§1.8** — *Never implement the probe guard twice.* It is flight logic shared
-  by the FSM, the RL policy and both environments. A guard that differs between
-  training and evaluation produces a policy whose probes are silently refused at
-  evaluation time, which looks exactly like a transfer failure.
+- **§1.8** — *Never let the two probe guards drift.* The environment boundary
+  forces one guard per side, so, like the fault model in §1.6, they are one
+  contract with two backends, held together by a shared states → verdicts test
+  table. A guard that differs between training and evaluation produces a policy
+  whose probes are silently refused at evaluation time, which looks exactly
+  like a transfer failure.
+- **§1.4 amendment** — add Isaac-side feature extraction as the second
+  sanctioned exception, paid for by a parity test against the PX4-side
+  extractor on a recorded fixture (§3.2).
 - **§1.9** — *Never reward belief entropy.* Ground truth may enter the reward
   only through a proper scoring rule over the true class (D16), and only in the
   reward.
@@ -556,23 +683,40 @@ ground-truth access in one clearly named function.
 
 ## 10. Order of operations
 
-1. **Reconcile the M4 status blocks** with commit `35b2fba` (§0 note above).
-2. **Apply §4 (torque coupling) before writing the M6 plugin.** This is the
-   cheapest possible moment; after the plugin exists and a dataset has been
-   generated, it costs a regeneration.
-3. **M5: add the three shared residual groups.** Also cheap now, expensive after
-   `feature_version` is referenced by a trained model.
-4. **M7: belief head, calibration, and the portable detector.** The RQ3 variants
-   fall out of this for free.
-5. **M7b: the kill-test.** Two to three days, and it decides whether steps 6–8
-   happen at all.
-6. If M7b passes: **freeze `action_v1` at 7 dims and `observation_v1` with the
-   belief**, then build M8b.1, run the D14a sanity check, then M8b.2.
-7. M9 with the matched policy pair; M10 with the extended matrix.
-8. If M7b fails: drop D13/RQ6, keep everything in §1's RQ3, §7 metrics for
-   calibration, and D15. The paper is still meaningfully stronger than the
-   original plan and nothing built so far is wasted.
+**Part A — now:**
 
-**Rough effort delta:** M5 +1 day, M6 +2 days, M7 +2 days, M7b 3 days, M8b +4
-days, M9 +5 days, M10 +1,200 episodes. Call it **three weeks**, of which the
-first six days are the ones that decide whether the remaining two weeks happen.
+1. **Reconcile the status blocks** (§0 note above): `planning.md` §0,
+   `README.md`, and `milestones.md`'s progress log for M4, M5 and M6.
+2. **Extend the M6 fixture** with the yaw-doublet response, and add the
+   healthy-vs-faulty yaw assertion (§4). No plugin change: torque is already
+   coupled.
+3. **M7: belief head and calibration** on `detector_px4_v1`. The RQ3 variants
+   fall out of this for free.
+
+**The gate:**
+
+4. **M7b stage 0** — about a day, right after step 2 (it needs only the
+   plugin, the farm and yaw-rate setpoint support). It decides whether any of
+   Part B happens.
+
+**Part B — only if stage 0 passes:**
+
+5. Settle the two §3.2 questions (sanctioned Isaac-side extractor; features
+   against the policy-level setpoint only), then M5's `feature_version: "2"`
+   and `normalization_v2`.
+6. The supplementary probe dataset run (§4), then `detector_portable_v1`, then
+   M7b stage 1.
+7. **Freeze `action_v1` at 7 dims and `observation_v1` with the belief**, then
+   build M8b.1, run the D14a sanity check, then M8b.2.
+8. M9 with the matched policy pair; M10 with the extended matrix.
+
+**If stage 0 fails:** drop D13/RQ6, keep Part A — §1's RQ3, §7's calibration
+metrics and D15. The paper is still meaningfully stronger than the original
+plan, and about a day has been spent on the idea.
+
+**Rough effort.** Part A: M6 +1 day, M7 +2 days. Gate: about 1 day. Part B:
+M5 +1 day, a supplementary dataset run (several sessions, going by
+`docs/fault_dataset.md`), M7 +2 days, M7b stage 1 +2 days, M8b +1 week (the
+Isaac-side extractor and its parity test are the new cost), M9 +5 days, M10
++1,200 episodes. Part B is **four weeks or more**. M4 and M6 both ran well
+past their estimates, so treat that figure as a floor.
