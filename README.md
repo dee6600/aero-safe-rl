@@ -8,7 +8,7 @@
 
 *Spot a weakening motor before the flight controller does, then decide how to finish the mission safely, without ever touching the low-level controller.*
 
-[![Status](https://img.shields.io/badge/status-M8%20next-brightgreen)](#-mission-progress)
+[![Status](https://img.shields.io/badge/status-M9%20next-brightgreen)](#-mission-progress)
 [![PX4](https://img.shields.io/badge/PX4-v1.17.0%20(stock)-blue)](https://github.com/PX4/PX4-Autopilot)
 [![Gazebo](https://img.shields.io/badge/Gazebo-Harmonic%208.15-orange)](https://gazebosim.org/)
 [![Isaac Sim](https://img.shields.io/badge/Isaac%20Sim-5.1%20%2B%20Isaac%20Lab-76B900)](https://isaac-sim.github.io/IsaacLab/)
@@ -19,6 +19,14 @@
 [The problem](#-the-problem-in-four-lines) · [Architecture](#-architecture) · [Progress](#-mission-progress) · [Bug bestiary](#-the-bug-bestiary) · [Getting started](#-getting-started) · [Roadmap](#-roadmap)
 
 <br>
+
+<p align="center">
+  <img src="docs/media/architecture.svg" alt="Architecture: Isaac Lab trains the recovery policy on up to 32,768 parallel drones; the two environments exchange only files (spec, normalisation stats, checkpoint, fault fixture); the PX4-in-the-loop stack of Gazebo, stock PX4, ROS 2, the AI fault detector and the recovery policy produces every reported number." width="100%">
+</p>
+
+<sub>Train in the gym (Isaac Lab), sit the exam in PX4. How to read it: <a href="#-architecture">Architecture</a>.</sub>
+
+<br><br>
 
 <img src="docs/media/square_circuit_mission.gif" alt="PX4 SITL flying the square_circuit mission in Gazebo: takeoff, four-corner square, hover, land" width="560">
 
@@ -96,24 +104,25 @@ comparison isolates the actual contribution. Full reasoning is in
 | 🧭 **RQ2: Recovery** | Given a fault estimate, does a learned high-level policy beat a hand-tuned rule-based policy on mission success and safety? |
 | 🔗 **RQ3: Coupling** | How sensitive is recovery to detection latency and false positives? Is the combination more than the sum of its parts? |
 | 🌬️ **RQ4: Generalization** | Does the policy transfer to unseen fault severities, timings, wind and vehicle parameters? |
-| 🌉 **RQ5: Sim-to-sim transfer** | Does a recovery policy trained in a massively parallel *reduced-order* simulator survive the move to a full autopilot-in-the-loop stack, and what gets lost on the way? |
+| 🌉 **RQ5: Sim-to-sim transfer** | Does a recovery policy trained in a massively parallel GPU simulator (no autopilot software, no ROS, a simulated detector) survive the move to a full autopilot-in-the-loop stack, and what gets lost on the way? |
 
 ## 🏗️ Architecture
 
-<p align="center">
-  <img src="docs/media/architecture.svg" alt="Architecture: Isaac Lab trains the recovery policy on 8,192 parallel drones; the two environments exchange only files (spec, normalisation stats, checkpoint, fault fixture); the PX4-in-the-loop stack of Gazebo, stock PX4, ROS 2, the AI fault detector and the recovery policy produces every reported number." width="100%">
-</p>
+The diagram at the top of this page, in words.
 
 **How to read it:**
 
-- **① The gym (Isaac Lab).** The recovery policy trains here, on 8,192
-  drones at once, against a reduced-order rotor model and a simulated detector
-  whose noise is fitted to the real one. It's fast, a little crude, and the
-  place where crashes are cheap.
+- **① The gym (Isaac Lab).** The recovery policy trains here, on up to
+  32,768 drones at once. Each one is PX4's own x500 model flown by a PyTorch
+  port of PX4's flight controller, with the same rotor fault as Gazebo, and
+  a simulated detector fitted to the real one's recorded output. It passes
+  all 16 closed-loop agreement checks against PX4
+  ([details](docs/isaac_env.md)). Crashes here are cheap.
 - **🧱 The wall.** The two sides live in separate conda environments (Python
-  3.11 and 3.10) and **never import each other**. They trade exactly four
-  things: the frozen observation/action spec, frozen normalisation stats, the
-  policy checkpoint, and a shared fault fixture. A checkpoint carries the
+  3.11 and 3.10) and **never import each other**. They trade only files:
+  the frozen observation/action spec, frozen normalisation stats, the fitted
+  detector-simulator parameters, shared test fixtures, and the policy
+  checkpoint. A checkpoint carries the
   digest of the spec it was trained on. If that digest is wrong, the checkpoint
   is refused, so a transfer result can't come from the two sides quietly
   disagreeing about what input #12 means.
@@ -149,7 +158,9 @@ measured.
 | ✈️ **750 / 750** | fault-injection flights delivered. The run survived a full disk and a session dying mid-run, and lost **zero** episodes ([details](docs/fault_dataset.md)) |
 | 🔍 **0.88 s** | median time for our detector to catch a mild fault (severity 0.2–0.4) on held-out flights, naming the right rotor 98.6–99.8% of the time ([details](docs/detector_results.md)) |
 | 🙈 **178 / 178** | mild-fault flights (severity 0.2–0.4) where PX4's own failure detector said nothing ([details](docs/fault_dataset.md)) |
-| ⚡ **546k env-steps/s** | Isaac Lab throughput at 8,192 parallel envs, on a laptop **RTX 2070** (Isaac's stated minimum is an RTX 4080) ([details](docs/isaac_feasibility.md)) |
+| ⚡ **24,297 decisions/s** | our full Isaac training environment at 32,768 parallel drones, on a laptop **RTX 2070** (Isaac's stated minimum is an RTX 4080), using 4.6 of 8 GB of graphics memory ([details](docs/isaac_env.md)) |
+| 🤝 **16 / 16** | closed-loop checks where the Isaac drone flies like PX4's: mission time, speed, motor effort, crash severity, touchdown speed ([details](docs/isaac_env.md)) |
+| 🪨 **s ≈ 0.42** | the physics cliff: above this rotor severity an x500 cannot hover, whatever any controller does ([details](docs/recovery_baseline.md)) |
 | 🎯 **6.44 ± 0.57 m** | position RMSE noise floor of a *healthy* mission ([details](docs/baseline_results.md)) |
 | 🔁 **σ = 0.083 m** | reproducibility at a fixed seed after a hard reset ([details](docs/baseline_results.md)) |
 | 🏃 **~8×** | real-time simulation speed before this machine runs out of CPU ([details](docs/simulation_notes.md)) |
@@ -158,7 +169,7 @@ measured.
 ## 🛫 Mission progress
 
 ```text
-M0 ▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱ M13      10 of 17 milestones done · M8 next
+M0 ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱ M13      12 of 17 milestones done · M9 next
 ```
 
 | # | Milestone | Status | What it bought us |
@@ -173,9 +184,9 @@ M0 ▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱ M13      10 of 17 milesto
 | M5 | Telemetry feature pipeline | ✅ | One feature extractor, frozen observation spec |
 | M6 | Fault injection + dataset | ✅ | 750 flights, 597 of them sabotaged on purpose |
 | M7 | AI fault detector | ✅ | Catches a mild fault in a median 0.88 s and names the right rotor 98.6–99.8% of the time |
-| M8 | Rule-based recovery baseline | ⬜ | The honest opponent the RL policy has to beat |
-| M8b | **Isaac Lab training environment** | ⬜ | The gym |
-| M9 | RL recovery policy (train Isaac, eval PX4) | ⬜ | The backseat navigator |
+| M8 | Rule-based recovery baseline | ✅ | The honest opponent. Finding: it does *not* beat flying on, because its own descent fools the detector ([details](docs/recovery_baseline.md)) |
+| M8b | **Isaac Lab training environment** | ✅ | The gym: PX4's x500 and controller in PyTorch, 16/16 agreement checks, up to 32,768 drones ([details](docs/isaac_env.md)) |
+| M9 | RL recovery policy (train Isaac, eval PX4) | ⏭️ next | The backseat navigator |
 | M10 | Full experiments + results | ⬜ | 📄 First publishable result |
 | M11 | Generalization tests | ⬜ | Wind, new faults, new timings |
 | M12 | Hexacopter extension | ⬜ | Six rotors, same brain |
@@ -197,6 +208,7 @@ was caught in the wild, pinned to a board, and now has a rule in
 | ⏳ **The Time Traveller** | Timeouts behave differently at 4× speed than at 1×. | `px4_msgs` timestamps follow the **wall clock** (measured ratio 0.991 at 4× speed). Flight logic now reads Gazebo's own clock, which gave 3.945. |
 | 🏠 **The Uninvited Roommate** | Two "independent" drones share one physics world, one clock, and one crash. | By default PX4 *joins* any Gazebo world it can find. Each worker now gets its own `GZ_PARTITION` and its own server. |
 | 👻 **The Ghost Flag** | `px4-param set … --instance 2` reports success. Instance 2 is unchanged. | `--instance` only works as the *first* argument. Anywhere else it's ignored, and the command hits instance 0 instead. |
+| 🎭 **The Ramp in Disguise** | The simulated detector passes every check except gentle faults, where it is suspiciously fast. | When the recovery controller landed before a slowly worsening fault finished ramping up, the fit recorded the flight as a *sudden* fault. Ramp lengths now come from the fault command, and the detector is checked once on flights nobody had looked at ([details](docs/isaac_env.md)). |
 | 🕵️ **The DDS Gremlin** | Under concurrent load, some flights lose offboard control (`offboard_control_signal_lost`). | **Still at large.** Confirmed not caused by this project's timing, with partial mitigation shipped. Wanted poster: [`docs/parallelism.md` §2.6](docs/parallelism.md). |
 
 ## 🚀 Getting started
@@ -225,6 +237,10 @@ conda activate aero-safe-rl
 
 # The fast unit-test suite (no simulator needed, a few seconds)
 python -m pytest tests/ -m "not sim and not slow"
+
+# The Isaac side lives in its own environment (Isaac Sim 5.1 + Isaac Lab)
+source scripts/activate_isaac.sh
+python -m pytest isaac/tests -m "not isaac and not slow"
 ```
 
 > [!TIP]
@@ -257,7 +273,8 @@ aero-safe-rl/
 ├── simulation/      # PX4/Gazebo layer: models, fault injection, sim clock
 ├── ros2_ws/src/     # colcon workspace: telemetry pipeline, mission executor
 ├── ai/              # fault detection: features, detector
-├── rl/              # reinforcement learning: env, rewards, policies
+├── rl/              # recovery policies (rule-based, learned) and the PX4-side driver
+├── isaac/           # Isaac Lab training environment (separate conda env, files only)
 ├── experiments/     # episode runner, parallel farm, analysis
 ├── scripts/         # env_report.sh, sim_start.sh, sim_stop.sh, ...
 ├── tests/           # unit (default), sim/ (@sim), slow/ (@slow), fixtures/
@@ -286,7 +303,9 @@ checks pass.
 
 🎯 **First result worth showing anyone** landed with **M7**: a detector that
 spots a weakening motor PX4 never notices ([results](docs/detector_results.md)).
-The recovery-policy results follow in M8–M10.
+The rule-based recovery baseline (M8) showed why this is hard: a recovery
+manoeuvre can itself mislead the detector. The learned policy (M9) trains in
+Isaac Lab against a detector simulator that reproduces exactly that.
 📄 **First publishable result** lands at the end of **M10**.
 
 <details>
