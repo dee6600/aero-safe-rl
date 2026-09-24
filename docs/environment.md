@@ -76,6 +76,13 @@ the comparison are already in the same clock domain.
   TensorBoard 2.21.0
 - Full frozen spec: `environment.yml` (repo root)
 
+## Python / training (conda env `isaacsim`)
+
+- Python 3.11.15, PyTorch 2.7.0+cu128
+- Isaac Sim 5.1.0, Isaac Lab 0.54.4 (cloned to `~/projects/IsaacLab`, commit `b0542fe2d`)
+- Activate with `source scripts/activate_isaac.sh`, never with ROS sourced (`CLAUDE.md` §0)
+- Holds the training side only (`isaac/`); it exchanges files, never imports, with `aero-safe-rl`
+
 ## Notes and deviations from a stock setup
 
 - **Micro-XRCE-DDS-Agent is installed to `~/.local`, not `/usr/local`.**

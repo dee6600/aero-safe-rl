@@ -118,5 +118,6 @@ recorded flights and the controller stepped at 5 decisions per second.
 - A learned policy trained against a detector simulator fitted only to level
   flight will not see finding 2. Either the detector-output simulator in M8b
   must model the error induced by the policy's own manoeuvres, or the
-  detector needs training data that includes recovery manoeuvres. Not decided
-  here.
+  detector needs training data that includes recovery manoeuvres. Resolved
+  in M8b by the first: the simulated detector adds the measured descent
+  over-read, and it passes the held-out check (`docs/isaac_env.md`).

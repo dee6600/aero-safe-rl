@@ -165,3 +165,9 @@ of it.
 3. **`OMNI_KIT_ACCEPT_EULA=YES` needs a home.** Currently exported by hand each
    session; belongs in an Isaac counterpart to `scripts/activate.sh` (`CLAUDE.md`
    §0) before anyone else hits the interactive-hang trap.
+
+**Status after M8b (2026-09-24).** 1: superseded; `isaac/aero_isaac/probe.py
+throughput` measures the real environment instead. 2: measured for the real
+environment without a training loop (up to 32,768 drones: 4.6 GB graphics
+memory, 7.4 GB computer memory, `docs/isaac_env.md`); the training loop's own
+memory is still M9's to measure. 3: done, `scripts/activate_isaac.sh`.

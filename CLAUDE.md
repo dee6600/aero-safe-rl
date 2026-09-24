@@ -57,7 +57,8 @@ The entire interface is three artifacts, all versioned per §7:
 
 | Artifact | Written by | Read by |
 |---|---|---|
-| `configs/rl/observation_v1.yaml`, `action_v1.yaml` | frozen by hand before training | both sides |
+| `configs/rl/observation_v2.yaml`, `action_v1.yaml`, `outcome_v1.yaml` | frozen by hand before training | both sides |
+| `configs/rl/detector_sim_v1.yaml` | `aero-safe-rl` (`experiments/fit_detector_sim.py`) | `isaacsim` |
 | frozen normalisation statistics | `aero-safe-rl` (from healthy flights) | both sides |
 | policy checkpoint (`.pt`, weights + spec digest) | `isaacsim` (training) | `aero-safe-rl` (evaluation) |
 
@@ -277,7 +278,7 @@ These are files with schemas and version strings, not conventions:
 |---|---|---|
 | Feature vector | `configs/features.yaml` | `feature_version` |
 | Episode record | `configs/schema/episode_record.yaml` | `schema_version` |
-| RL observation | `configs/rl/observation_v1.yaml` | `obs_version` |
+| RL observation | `configs/rl/observation_v2.yaml` (v1 = its 13 features) | `obs_version` |
 | RL action | `configs/rl/action_v1.yaml` | `action_version` |
 | Fault spec | `configs/faults/*.yaml` | `fault_schema_version` |
 | Instance spec | `${run_dir}/instance_<N>.json` | `spec_version` |

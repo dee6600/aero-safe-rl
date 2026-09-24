@@ -2,13 +2,15 @@
 
 **Planning document — roadmap only. No implementation.**
 
-Status: Phases 0–1, 1b, 3, 3b, 4, 5, 6 and 7 done; Phase 2 substantially done
+Status: Phases 0–1, 1b, 3, 3b, 4, 5, 6, 7, 8 and 8b done; Phase 2 substantially done
 with one open reliability item (`docs/parallelism.md` §2.6). Phase 4's
 evaluation farm passed a 400-episode soak at 2 workers (`docs/throughput.md`);
 Phase 6 delivered the 750-episode labelled fault dataset
 (`docs/fault_dataset.md`); Phase 7 delivered the fault detector and the error
-model Phase 8b needs (`docs/detector_results.md`). Next: Phase 8 (rule-based
-recovery baseline). An active-fault-diagnosis extension was
+model Phase 8b needs (`docs/detector_results.md`). Phase 8's rule-based
+baseline does not beat flying on with no recovery (`docs/recovery_baseline.md`);
+Phase 8b's Isaac Lab environment flies like PX4 on all 16 agreement checks
+(`docs/isaac_env.md`). Next: Phase 9 (the learned recovery policy). An active-fault-diagnosis extension was
 proposed and deferred until after the MVP (`docs/change_active_diagnosis.md`).
 
 **Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
@@ -235,8 +237,9 @@ rather than be discovered at training time:
 1. **The policy observation must be computable in both simulators.** Anything
    PX4-specific — control-allocation residual, EKF innovations — may feed the
    *detector*, which runs only on the PX4 side, but may not enter the policy's
-   observation vector. `configs/rl/observation_v1.yaml` is where this is
-   enforced, and a test checks both sides produce the same dimensions.
+   observation vector. `configs/rl/observation_v2.yaml` (the 13 shared
+   features of `observation_v1.yaml` plus detector, mission and previous-action
+   values) is where this is enforced, and a test checks both sides produce the same dimensions.
 2. **The fault model exists twice and must mean the same thing twice.** A C++
    gz-sim plugin and an Isaac-side Python rotor model, validated against each
    other for matching thrust reduction at matched severity. This is the one
@@ -751,7 +754,7 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
     switches, not the noise on its level. Model it as a detection-delay
     distribution plus rare short false alarms, not as Gaussian noise on the
     true severity.
-  - Both environments asserted against `observation_v1.yaml` by one shared test.
+  - Both environments asserted against `observation_v2.yaml` by one shared fixture.
 - **Precondition** — Phase 3b's measurement, Phase 7's detector error model.
 - **Validation** — The two environments agree dimension-for-dimension on the
   observation spec; a hand-written scripted policy (e.g. "always slow down")
@@ -903,7 +906,7 @@ The evaluation env must not re-implement flying, reset or logging — it wraps
 `EpisodeRunner`. The training env is necessarily a separate implementation and
 is the reason `CLAUDE.md` §0.1 exists.
 
-**The specs are frozen once and shared.** `configs/rl/observation_v1.yaml` and
+**The specs are frozen once and shared.** `configs/rl/observation_v2.yaml` and
 `action_v1.yaml` are authored before either environment is built, and a test
 asserts both environments expose spaces matching them. Two environments that
 disagree about the observation layout produce a policy that appears to train

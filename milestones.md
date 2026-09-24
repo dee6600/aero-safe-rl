@@ -46,7 +46,9 @@ What this changes here:
   operating point (8,192 parallel envs), no memory growth over a 10-minute
   sustained run. Host RAM, not GPU VRAM, turned out to be this machine's real
   constraint. Full numbers: `docs/isaac_feasibility.md`.
-- **New M8b** — the Isaac Lab training environment.
+- **New M8b** — the Isaac Lab training environment. ✅ done 2026-09-24:
+  PX4's x500 and a PyTorch port of PX4's controller, 16/16 agreement checks,
+  up to 32,768 drones on this graphics card (`docs/isaac_env.md`).
 - **M4 is rescoped** from a training farm to an *evaluation* farm — hundreds
   of episodes, 2 workers, not millions of steps. Its gate on M9 moved to M3b,
   which has now cleared it. This also defuses the open
@@ -57,7 +59,7 @@ What this changes here:
   divergence band, and every multi-instance finding still stand, and the
   ROS 2 ↔ PX4 layer is untouched.
 
-Last revised: 2026-09-21.
+Last revised: 2026-09-24.
 
 ---
 
@@ -2875,7 +2877,14 @@ so this milestone itself got smaller.
 **Depends on:** M3b (sample budget), M7, M8, M8b. **Blocks:** M10.
 
 **Do not start until `docs/isaac_feasibility.md` says the sample budget is
-reachable.**
+reachable.** It is: M8b measured 8,688 decisions per second at 8,192 drones
+and 24,297 at 32,768, so the budget can be far beyond 1–3 M decisions.
+
+**What M8b hands over** (`docs/isaac_env.md`): `AeroEnv` with a zero reward
+and per-episode results in `episode_log`; observation contract v2 (27
+values); the simulated detector, whose one known gap is ramps at severity
+0.5–0.7 detected 0.58 s late; and the airframe fact that outcomes can only
+differ between methods at s ≈ 0.35–0.45.
 
 **Key deliverables:**
 - Observation, action and reward frozen as versioned YAML **before training
