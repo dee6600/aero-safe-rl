@@ -189,5 +189,7 @@ of it.
 **Status after M8b (2026-09-24).** 1: superseded; `isaac/aero_isaac/probe.py
 throughput` measures the real environment instead. 2: measured for the real
 environment without a training loop (up to 32,768 drones: 4.6 GB graphics
-memory, 7.4 GB computer memory, `docs/isaac_env.md`); the training loop's own
-memory is still M9's to measure. 3: done, `scripts/activate_isaac.sh`.
+memory, 7.4 GB computer memory, `docs/isaac_env.md`). The training loop's own
+memory was measured in M9: 4.2 GB graphics and 6.3 GB computer memory at
+16,384 drones, 24.5 s per update (`docs/rl_policy.md`). 3: done,
+`scripts/activate_isaac.sh`.

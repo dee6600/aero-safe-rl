@@ -10,8 +10,14 @@ Phase 6 delivered the 750-episode labelled fault dataset
 model Phase 8b needs (`docs/detector_results.md`). Phase 8's rule-based
 baseline does not beat flying on with no recovery (`docs/recovery_baseline.md`);
 Phase 8b's Isaac Lab environment flies like PX4 on all 16 agreement checks
-(`docs/isaac_env.md`). Next: Phase 9 (the learned recovery policy). An active-fault-diagnosis extension was
-proposed and deferred until after the MVP (`docs/change_active_diagnosis.md`).
+(`docs/isaac_env.md`). Phase 9's learned policy, trained in Isaac and checked
+on PX4, never gives up a mission it could finish (71/71 at severities
+0.20–0.35, against the rule-based controller's 6/23) and carries over from
+Isaac to PX4. It saves few drones above the physical limit; one seed trained
+longer brought crashes at 0.45–0.50 to 10/16 against 14/14
+(`docs/rl_policy.md`). Next: Phase 10 (the full comparison). An
+active-fault-diagnosis extension was proposed and deferred until after the
+MVP (`docs/change_active_diagnosis.md`).
 
 **Revised 2026-09-21 — the simulator strategy changed.** RL training moves to a
 GPU-parallel **NVIDIA Isaac Lab** environment; PX4-in-the-loop (Gazebo) remains
@@ -31,7 +37,7 @@ Evidence: `docs/parallelism.md`. Coding rules: `CLAUDE.md`.
 
 Companion documents: `milestones.md` (build order), `CLAUDE.md` (coding rules),
 `docs/parallelism.md` (verified multi-instance behaviour).
-Last updated: 2026-09-23
+Last updated: 2026-09-25
 
 ---
 
@@ -792,6 +798,19 @@ week. See `milestones.md`'s M13 timeline note for the full framing.
   that merely ties the baseline is a legitimate finding — report it rather than
   tuning until it wins.** A policy that beats it in Isaac and not on PX4 is the
   RQ5 result and is reported as such, not quietly retuned.
+- **Status (2026-09-25): done.** Full results: `docs/rl_policy.md`; build
+  log: `milestones.md` M9.
+  - **Success: criterion met.** At 0.20–0.35 the policy finished 100% of
+    missions (95% interval 95–100%), against the rule-based controller's 26%
+    (13–46%).
+  - **Crash rate: criterion not met.** No method crashes below 0.40, and at
+    0.45 the three seeds (92%) tie the baselines at 8 flights per cell.
+  - **Transfer table: exists.** Isaac crash rates agree with PX4's in every
+    cell; at 0.40, PX4 finished more missions than Isaac predicted.
+  - **Longer training exposed a reward flaw.** One seed learned never to
+    take off. A flight that never flies scores 0, which beats flying on
+    average under an 80%-faulty training mix. This must be fixed before any
+    further training.
 
 ---
 
@@ -945,6 +964,24 @@ train within this project's sample budget.
   good outcome, not a failure. Without this the policy learns to gamble.
 
 All weights live in `configs/rl/*.yaml`, never in code.
+
+> **As built (Phases 8, 8b and 9).** The recommendations above were the
+> starting point, not the final contract.
+>
+> - **Observation:** `observation_v2.yaml`, 27 values: the 13 shared
+>   features, the detector's output, mission progress and the previous
+>   action. There is no frame history.
+> - **Action:** `action_v1.yaml`, 3 values: speed scale, altitude offset
+>   down to −3.5 m, and an irreversible land.
+> - **Reward:** `reward_v2.yaml`. Outcome values +10 / +4 / 0 / −10 for
+>   success, safe landing, incomplete and crash (the user's "keep flying
+>   only if at least 70% likely to finish"), touchdown speed at −1 per m/s,
+>   and exact progress-difference shaping. Success is paid when the mission
+>   is completed.
+> - **Dropped:** the tracking, effort and attitude penalties, because the
+>   policy never commands motors.
+>
+> Why each changed: `milestones.md` M8 and M9; results: `docs/rl_policy.md`.
 
 ### 7.3 Algorithm
 **PPO only for v1.** On-policy, stable, robust to hyperparameters, well-suited to
@@ -1219,9 +1256,9 @@ aero-safe-rl/
 | **5** | Feature vector logged for a full healthy mission with no gaps; replay determinism verified bitwise; causality test passes; normalisation stats frozen |
 | **6** | Graded severity injected and **confirmed applied**, visible in features above the Phase 3 noise floor; PX4 `FailureDetector` confirmed silent at target severities; ≥500-episode labelled dataset generated; PX4 tree unmodified |
 | **7** | ✅ Detector evaluated against threshold and classical baselines on held-out **episodes**, per severity: better detection delay and severity error than the best baseline (tick AUROC a tie, false alarms slightly worse — reported, not tuned away); per-severity ROC and delay distribution reported; online inference < 20 ms verified live on 2 workers. See `docs/detector_results.md` |
-| **8** | FSM measurably beats no-recovery across the severity sweep; tuning sweep archived; shared policy interface in place |
-| **8b** | Both environments assert against one frozen `observation_v1.yaml`; Isaac and Gazebo fault models validated to match at matched severity; detector-output simulator fitted to Phase 7's measured error and documented |
-| **9** | Obs/action/reward specs frozen and version-stamped before training; PPO policy beats the tuned FSM **on the PX4 stack** on success and crash rate with non-overlapping CIs over ≥3 seeds — **or** the null result is documented with evidence; the RQ5 Isaac-vs-PX4 transfer table exists |
+| **8** | ✅ *(closed with the null result)* FSM measurably beats no-recovery across the severity sweep; tuning sweep archived; shared policy interface in place. It does **not** beat flying with no recovery, reported as such in `docs/recovery_baseline.md` |
+| **8b** | ✅ Both environments assert against one frozen observation contract (built as `observation_v2.yaml`); Isaac and Gazebo fault models validated to match at matched severity; detector-output simulator fitted to Phase 7's measured error and documented (`docs/isaac_env.md`) |
+| **9** | ✅ Obs/action/reward specs frozen and version-stamped before training; PPO policy beats the tuned FSM **on the PX4 stack** on success and crash rate with non-overlapping CIs over ≥3 seeds — **or** the null result is documented with evidence; the RQ5 Isaac-vs-PX4 transfer table exists. **Met on success, not on crash rate** (tie at 8 flights per cell), both documented in `docs/rl_policy.md` |
 | **10** | Full condition matrix (C1–C6) executed; all figures/tables regenerate from raw logs by one command; RQ3 ablation complete; invalid episodes accounted for explicitly |
 | **11** | Generalization table complete, including honest failure-mode analysis |
 | **12** | Hexacopter flies healthy mission and closes the fault→detect→recover loop |
@@ -1248,19 +1285,25 @@ work is under **Open now**.
 
 ### Open now, in order
 
-Phases 3b, 4, 5, 6 and 7 are **done** (see `milestones.md`'s progress log).
-What remains for the MVP:
+Phases 3b to 9 are **done** (see `milestones.md`'s progress log). What
+remains for the MVP is **Phase 10**, the full comparison on PX4. Carry these
+over from Phase 9:
 
-1. **Phase 8** — the rule-based recovery baseline, consuming the Phase 7
-   detector through `ai/detector/runtime.py`.
-2. **Phase 8b** — the Isaac Lab training environment. Its detector-output
-   simulator is fitted to Phase 7's `results/m7_detector_v1/error_model.json`.
-3. **Phases 9 → 10** — RL training in Isaac, evaluation on PX4, full
-   experiments.
-
-**Do not start Phase 8b or 9 until `docs/isaac_feasibility.md` exists and says
-the sample budget is reachable.** The old gate on `docs/throughput.md` now
-governs the evaluation sweep rather than training.
+1. **Fix the "refuse to fly" option before training any further.** A
+   policy trained to 600 updates learned to commit to land before take-off.
+   Candidate fixes, each a new version file: no land decision before the
+   drone is airborne; a realistic healthy share in training; a negative
+   value for a flight that never flies.
+2. **Decide which policies represent C4.** The pre-registered result is the
+   300-update `train_v3` set, three seeds. The strongest single policy is
+   `train_v4` seed 1.
+3. **Build C5 and C6 on the PX4 side.** C6's all-zero detector input
+   already works. C5 needs the true fault plumbed from `EpisodeRunner` into
+   the detector slot.
+4. **Use seeds from 10000 up** for the trial run and the full sweep. Every
+   seed below that has been used.
+5. **Keep Gazebo time lean.** Screen in Isaac first, reuse paired baseline
+   runs, and gate policies before flying them.
 
 ---
 

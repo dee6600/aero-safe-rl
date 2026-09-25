@@ -243,8 +243,10 @@ python scripts/environments/random_agent.py --task Isaac-Quadcopter-Direct-v0 --
 
 Omitting `--headless` is what opens the window — this is the same task M3b's
 throughput sweep ran headless. `--num_envs 4` gives you four quadrotors side
-by side in one Isaac Sim viewport; the actions are random (no trained policy
-exists yet, that's M9), so expect them to drift and tumble, not fly
+by side in one Isaac Sim viewport; the actions are random (this stock task
+has no trained policy; this project's own trained policies and the Isaac
+environment they trained in are described in `docs/rl_policy.md` and
+`docs/isaac_env.md`), so expect them to drift and tumble, not fly
 purposefully — this is for GUI familiarity, not a demo of anything trained.
 Closing the window or Ctrl-C *usually* stops it cleanly.
 

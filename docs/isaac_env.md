@@ -1,7 +1,8 @@
 # The Isaac Lab training environment (M8b)
 
-M9 trains the recovery policy in Isaac Lab, with thousands of drones in
-parallel on the graphics card, and evaluates it on the PX4 + Gazebo stack.
+M9 trained the recovery policy in Isaac Lab, with thousands of drones in
+parallel on the graphics card, and evaluated it on the PX4 + Gazebo stack
+(results: `docs/rl_policy.md`).
 This document records how the Isaac side was built to fly like the PX4 side,
 and the checks showing that it does. Everything here was measured; nothing on
 the PX4 side was adjusted to make a check pass.
@@ -257,11 +258,25 @@ script refuses to read a held-out run until that run has finished.
 `isaac/aero_isaac/env.py` (`AeroEnv`, an Isaac Lab `DirectRLEnv`). Each drone
 starts on the ground, takes off through the mission tracker, and flies the
 square circuit. A fault is drawn per drone: 80% of episodes, one rotor,
-severity 0.2–0.9, onset 5–25 s, step or ramp (1–5 s). M9 widens these. A land
-decision is final and mimics PX4's land mode: hold position, descend at
-0.7 m/s. An episode ends on uncommanded ground contact, after landing and
-settling for 2 s, or at the mission time limit. The reward is zero; M9
-freezes it. Per-episode results go to `env.episode_log`.
+severity 0.2–0.9, onset 5–25 s, step or ramp (1–5 s). A land decision is
+final and mimics PX4's land mode: hold position, descend at 0.7 m/s. An
+episode ends on uncommanded ground contact, after landing and settling for
+2 s, or at the mission time limit. Per-episode results go to
+`env.episode_log`.
+
+**Added in M9** (all off by default, so the defaults above still fly exactly
+as M8b, and the agreement checks stay valid):
+- the reward (`reward.py`, `configs/rl/reward_v2.yaml`);
+- running out of mission time now ends an episode as "incomplete", rather
+  than cutting it off;
+- per-episode training randomisation of faults, mass, wind, sensor noise
+  and the simulated detector (`training_cfg`, from the training settings);
+- an action mapping from the network's output;
+- four traced example drones;
+- an on-card table of every finished episode (`records.py`) for the
+  training dashboard.
+
+Details: `docs/rl_policy.md`.
 
 Headless smoke test (`isaac/tests/test_env.py`, 16 drones at s 0 / 0.3 /
 0.45 / 0.7, about 5 minutes): observation shape (16, 27) and finite;

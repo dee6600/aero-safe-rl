@@ -54,6 +54,7 @@ What this changes here:
   which has now cleared it. This also defuses the open
   `offboard_control_signal_lost` issue.
 - **M9** trains in Isaac, evaluates on PX4, and gains the RQ5 transfer table.
+  ✅ done 2026-09-25 (`docs/rl_policy.md`).
 - **M5 and M6 gain one constraint each** — see those milestones.
 - **Nothing measured so far is invalidated.** The M3 noise floor, the
   divergence band, and every multi-instance finding still stand, and the
@@ -228,8 +229,8 @@ discovering its bugs underneath a training run in M9.
 | M6 | Fault injection + dataset | 1.5 wk | **High** | the farm |
 | M7 | AI fault detector | 2 wk | Medium | the dataset |
 | M8 | Rule-based recovery baseline | 1 wk | Low | policy interface |
-| M8b | **Isaac Lab training environment** ⭐ | 1 wk | **High** | the shared obs/action spec |
-| M9 | RL recovery policy (train Isaac, eval PX4) | 2 wk | **High** | everything |
+| M8b | **Isaac Lab training environment** ⭐ ✅ | 1 wk | **High** | the shared obs/action spec |
+| M9 | RL recovery policy (train Isaac, eval PX4) ✅ | 2 wk | **High** | everything |
 | M10 | Full experiments + results | 2 wk | Medium | metrics module |
 | M11 | Generalization tests | 2 wk | Low | — |
 | M12 | Hexacopter extension | 2 wk | Medium | — |
@@ -2730,7 +2731,7 @@ tests/sim/test_policy_flight.py     2 workers: nominal flight matches M6; contro
 
 ---
 
-# M8b — Isaac Lab training environment  ⭐ new (D12)
+# M8b — Isaac Lab training environment ✅  ⭐ new (D12)
 
 **Goal:** the environment the policy actually trains in — N parallel quadrotors
 on GPU, implementing the *same* frozen observation/action spec as the
@@ -2867,7 +2868,7 @@ observation must be assembled from the spec, never hand-packed.
 
 ---
 
-# M9 — RL recovery policy (train in Isaac, evaluate on PX4)
+# M9 — RL recovery policy (train in Isaac, evaluate on PX4) ✅
 
 **Goal:** train a high-level policy that takes the detector's estimate and
 decides how to keep the mission alive. Still the core contribution — but under
@@ -3353,6 +3354,26 @@ tables.
   flights per cell the result says "clearly works, clearly broken, or unclear"
   and is never reported as a result.
 
+**Carried over from M9 (2026-09-25).** Details: M9 task 7 and
+`docs/rl_policy.md`.
+
+- **Before any further training**, remove the "refuse to fly" option that
+  `train_v4` seed 2 found. Candidate fixes: no land decision before the
+  drone is airborne, on both sides; a realistic healthy share in training;
+  a negative value for a flight that never flies. Any of them is a new
+  version file.
+- **Choose C4's policies up front.** The pre-registered set is the
+  300-update `train_v3` seeds 1–3. The strongest single policy is `train_v4`
+  seed 1. Either way, report every seed, never only the best.
+- **C5 is not built.** The true fault has to be plumbed from
+  `EpisodeRunner` into the detector slot (a new object in the shape of the
+  detector's output). C6 already works: no detector means an all-zero input.
+- **Already in place:** `run_recovery.py fly --policy learned` and
+  `transfer`, and Wilson intervals in `experiments/metrics.py`.
+- **Seeds:** use 10000 and up; every seed below that has been used.
+- **Keep Gazebo lean:** screen policies in Isaac first, and reuse paired
+  baseline runs on a shared schedule.
+
 **Why C5/C6 matter:** C5 vs C4 separates "the detector is imperfect" from "the
 policy is imperfect" — the question every reviewer asks first. Excluded/invalid
 episodes are a result to report, not a nuisance to hide — if C4 restarts more
@@ -3497,7 +3518,7 @@ Update this as milestones complete.
 | M7 | **Done** | 2026-09-23 | Was M6. Rotor-symmetric streaming GRU, 5-member ensemble (user-chosen over a 1D-CNN). On the test flights it detects weak faults (s 0.2–0.4) in a median 0.88 s vs the random forest's 1.18 s, identifies the rotor 98.6–99.8% of the time, and estimates severity with MAE ≤ 0.022. ECE is 0.004 and uncertainty→error AUROC 0.91. Tick AUROC ties the random forest; the model loses on false alarms (6 vs 4 short events in 0.69 h). Verified live on 2 concurrent workers (right rotor, ~0.55 s delay, p99 tick ≤ 10.7 ms), after fixing a real live-latency overshoot (p99 34.5 ms → stacked-weights streaming path). `error_model.json` written for M8b. Full results: `docs/detector_results.md`. |
 | M8 | **Done** | 2026-09-23 | Was M7. Physics limit: hover is impossible above rotor severity ≈ 0.41, so recovery can matter only for s ≈ 0.35–0.45. Built the 3-dimension action spec, the outcome rule (crash = tilt > 60° or touchdown > 2.0 m/s), the moving-setpoint mission tracker, policy-driven flight with ground-contact termination (episode schema v5), and the rule-based recovery controller, tuned offline then on the simulator. **Validation: the controller does not beat flying with no recovery.** It never landed a healthy drone, but its own recovery descent makes the detector over-read severity and trigger needless landings. Full results: `docs/recovery_baseline.md`. |
 | M8b | **Done** | 2026-09-24 | Isaac Lab training environment: PX4's x500 imported, PX4's flight controller ported to PyTorch, all 16 closed-loop agreement gates with PX4 pass. Simulated detector fitted to flights the detector never trained on; fresh confirmation run passes 13 of 14 checks, the miss (ramps at 0.5–0.7 detected 0.58 s late) recorded as a known gap. Up to 32,768 drones on one graphics card. Full results: `docs/isaac_env.md`. |
-| M9 | **Done** | 2026-09-25 | Was M8. **Overnight extension to 600 updates (`train_v4`):** seed 1 improved again. On PX4 it crashed 10 of 16 at 0.45–0.50, against 14 of 14 for no recovery, and saved drones at 0.50 for the first time. Seed 3 was unchanged. Seed 2 learned to refuse to take off, a flaw in the reward together with the fault mix; it was not flown, by a gate written beforehand. The 300-update results below remain the result of record. Trained in Isaac Lab (`rsl_rl`, 16,384 drones, three seeds), checked on PX4. Two flaws were caught before any PX4 number existed: the reward-ranking check found `reward_v1` paying for flying low (fixed in `reward_v2`), and seed 1's review found the exploration bonus causing accidental landings (`train_v2`). `train_v3` (more training on 0.3–0.5 faults, fixed learning rate) was adopted by a rule written beforehand. **On PX4 (seed 9101, 348 valid flights):** the policy finished 71 of 71 missions at 0.20–0.35, against the rule-based controller's 6 of 23. It finished 9 of 23 at 0.40, against 0 for both baselines. It did not save drones at 0.45 (92% crash, against 100% and 86%). No landings on 45 healthy flights. **Transfer:** every Isaac crash rate falls inside the PX4 interval; at 0.40, PX4 finished more missions than Isaac predicted. Full results: `docs/rl_policy.md`. |
+| M9 | **Done** | 2026-09-25 | Was M8. Trained in Isaac Lab (`rsl_rl`, 16,384 drones, three seeds), checked on PX4. Two flaws were caught before any PX4 number existed: the reward-ranking check found `reward_v1` paying for flying low (fixed in `reward_v2`), and seed 1's review found the exploration bonus causing accidental landings (`train_v2`). `train_v3` (more training on 0.3–0.5 faults, fixed learning rate) was adopted by a rule written beforehand. **On PX4 (seed 9101, 348 valid flights):** the policy finished 71 of 71 missions at 0.20–0.35, against the rule-based controller's 6 of 23. It finished 9 of 23 at 0.40, against 0 for both baselines. It did not save drones at 0.45 (92% crash, against 100% and 86%). No landings on 45 healthy flights. **Transfer:** every Isaac crash rate falls inside the PX4 interval; at 0.40, PX4 finished more missions than Isaac predicted. These 300-update results are the result of record. **Overnight extension to 600 updates (`train_v4`):** seed 1 improved again. On PX4 it crashed 10 of 16 at 0.45–0.50, against 14 of 14 for no recovery, and saved drones at 0.50 for the first time. Seed 3 was unchanged. Seed 2 learned to refuse to take off, a flaw in the reward together with the fault mix; by a gate written beforehand, it was not flown. Full results: `docs/rl_policy.md`. |
 | M10 | Not started | | Was M9. |
 | M11 | Not started | | Was M10. |
 | M12 | Not started | | Was M11. |

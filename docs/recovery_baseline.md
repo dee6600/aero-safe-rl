@@ -121,3 +121,7 @@ recorded flights and the controller stepped at 5 decisions per second.
   detector needs training data that includes recovery manoeuvres. Resolved
   in M8b by the first: the simulated detector adds the measured descent
   over-read, and it passes the held-out check (`docs/isaac_env.md`).
+- **Outcome (M9, `docs/rl_policy.md`).** On the same fresh fault schedule
+  the learned policy finished 71 of 71 missions at 0.20–0.35, where this
+  controller finished 6 of 23. It finished 39% at 0.40, where this
+  controller finished none. At 0.45 it tied (92% against 86% crash).

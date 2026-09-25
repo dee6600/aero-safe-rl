@@ -210,6 +210,10 @@ was caught in the wild, pinned to a board, and now has a rule in
 | 🏠 **The Uninvited Roommate** | Two "independent" drones share one physics world, one clock, and one crash. | By default PX4 *joins* any Gazebo world it can find. Each worker now gets its own `GZ_PARTITION` and its own server. |
 | 👻 **The Ghost Flag** | `px4-param set … --instance 2` reports success. Instance 2 is unchanged. | `--instance` only works as the *first* argument. Anywhere else it's ignored, and the command hits instance 0 instead. |
 | 🎭 **The Ramp in Disguise** | The simulated detector passes every check except gentle faults, where it is suspiciously fast. | When the recovery controller landed before a slowly worsening fault finished ramping up, the fit recorded the flight as a *sudden* fault. Ramp lengths now come from the fault command, and the detector is checked once on flights nobody had looked at ([details](docs/isaac_env.md)). |
+| 🪂 **The Low-Flying Bonus** | Before any training, the reward preferred "slow down and descend" at mild faults, although it finished no more missions than flying on. | Success was paid only after PX4's final landing. A drone that is already low lands sooner, so under the discount its success was worth more. A reward-ranking check with scripted policies caught it; success is now paid when the mission is completed ([details](docs/rl_policy.md)). |
+| 🎲 **The Accidental Lander** | During training, more healthy drones landed every update. | The exploration bonus kept widening the random noise on the irreversible "land" command, and nothing in the task pushed back. Removed ([details](docs/rl_policy.md)). |
+| 🙅 **The Conscientious Objector** | Trained twice as long, one policy simply stops taking off. | A flight that never flies scores 0. When 80% of training flights carry a fault, flying averages about the same. **Still at large**: a rule keeps such policies off the Gazebo simulator, and a fix is due before any further training ([details](docs/rl_policy.md)). |
+| 🌋 **The Ground Spike** | In Isaac, blocks of exactly ten neighbouring drones commit to land before take-off. | While a drone sits on the ground spinning up, Isaac's contact physics can spike the acceleration reading 20-fold. PX4's filtered sensors never do, so it only happens in training ([details](docs/rl_policy.md)). |
 | 🕵️ **The DDS Gremlin** | Under concurrent load, some flights lose offboard control (`offboard_control_signal_lost`). | **Still at large.** Confirmed not caused by this project's timing, with partial mitigation shipped. Wanted poster: [`docs/parallelism.md` §2.6](docs/parallelism.md). |
 
 ## 🚀 Getting started
@@ -257,7 +261,7 @@ python -m pytest isaac/tests -m "not isaac and not slow"
 | Evaluation simulator | [Gazebo Harmonic](https://gazebosim.org/) 8, plus our own gz-sim rotor-fault plugin |
 | Training simulator | [NVIDIA Isaac Sim 5.1 + Isaac Lab](https://isaac-sim.github.io/IsaacLab/), GPU-parallel |
 | Middleware | ROS 2 Humble, `px4_msgs` / `px4_ros_com` over uXRCE-DDS |
-| ML | PyTorch: a rotor-symmetric GRU ensemble for fault detection; PPO for the recovery policy (trained on the Isaac side). scikit-learn for the detector baselines |
+| ML | PyTorch: a rotor-symmetric GRU ensemble for fault detection; PPO for the recovery policy (`rsl_rl`, trained on the Isaac side with 16,384 drones at once). scikit-learn for the detector baselines |
 | Environments | two conda envs, pinned: `aero-safe-rl` (Python 3.10, evaluation) and `isaacsim` (Python 3.11, training) |
 
 ## 🗂️ Repository structure
