@@ -270,3 +270,19 @@ def classify_outcome(termination_reason: str, steps: Mapping[str, Sequence[float
     else:
         outcome = Outcome.INCOMPLETE
     return EpisodeOutcome(outcome, touchdown, max_tilt)
+
+
+def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a proportion (95% by default): the range a
+    rate measured as successes / n is consistent with. Unlike the normal
+    approximation it stays inside [0, 1] and is not zero-width at 0/n or n/n,
+    which matters for M9's small cells (8 flights). Returns (nan, nan) for n = 0."""
+    if n <= 0:
+        return (float("nan"), float("nan"))
+    if not 0 <= successes <= n:
+        raise ValueError(f"successes {successes} outside [0, {n}]")
+    p = successes / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, float(centre - half)), min(1.0, float(centre + half)))

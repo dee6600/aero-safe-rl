@@ -1,0 +1,122 @@
+# Recovery-policy training setup, version 4 (M9 task 7). Read by the Isaac
+# side only (isaac/aero_isaac/train.py). Frozen: changing anything here
+# means train_v5.yaml, with the reason written down, never an edit
+# (milestones.md M9).
+#
+# Why version 4 (2026-09-25, user decision): identical to train_v3 except
+# the budget, 300 -> 600 updates. All three train_v3 seeds were still
+# improving when the fixed 300-update budget stopped them (training crash
+# rate at 0.35-0.45 still falling, docs/rl_policy.md). Each v4 run resumes
+# from its v3 seed's final checkpoint (update 299, optimiser state
+# included): with a fixed learning rate and nothing that depends on the
+# total length, that is the same as training 600 updates from the start.
+# The v3 runs are kept unchanged as the 300-update results. The final
+# (update 599) checkpoint is the one reported, never a "best" one.
+#
+# train_v3's header, kept for its reasons:
+# | Recovery-policy training setup, version 3 (M9 task 5). Read by the Isaac
+# | side only (isaac/aero_isaac/train.py). Frozen: changing anything here
+# | means train_v4.yaml, with the reason written down, never an edit
+# | (milestones.md M9).
+# |
+# | Why version 3 (2026-09-24, user decision: "one focused retry"). Seed 1
+# | under train_v2 learned not to panic -- healthy and mild-fault drones finish
+# | 99.5-100% of missions, accidental landings near zero -- but not the
+# | recovery manoeuvre: from update 25 to 200 the crash rate for faults of
+# | 0.35-0.45 stayed at 33%, the same as no recovery, although the scripted
+# | check (results/m9_reward_ranking_v2.json) shows reacting cuts it (at 0.40
+# | from 16% to 3%). Diagnosis: that band is ~9% of training episodes and its
+# | gain is small against the noise of the rest, and the adaptive learning
+# | rate kept the step size near 1e-4. Two changes, nothing else:
+# |   * severity_focus: half of faulted episodes draw severity from 0.3-0.5,
+# |     where decisions matter: episodes at 0.35-0.45 go from ~9% to ~24%,
+# |     at 0.3-0.5 from ~18% to ~49%. The evaluation grid is unchanged.
+# |   * a fixed learning rate of 3e-4 instead of the adaptive schedule.
+# |
+# | Adoption rule, written before the trial runs: v3 replaces v2 for seeds 2
+# | and 3 only if its seed-1 final policy, scored in Isaac on the fixed grid
+# | (agreement.py --checkpoint, 256 drones per cell, seed 3), has a mean crash
+# | rate over the 0.40 and 0.45 cells at least 5 points below v2 seed 1's,
+# | and still completes >= 98% of missions at 0.20-0.35. Otherwise seeds 2
+# | and 3 use train_v2, and both are reported.
+
+train_version: "4"
+# reward_v2, not v1: the reward-ranking gate found v1 paid success after the
+# final landing, which rewarded flying low for no reason (reward_v2.yaml).
+# Changed 2026-09-24, before any training.
+reward: configs/rl/reward_v2.yaml
+
+seeds: [1, 2, 3]
+num_envs: 16384
+
+# rsl_rl 5.0.1 proximal policy optimisation. Isaac takes about 1 s of wall
+# time per decision step whatever the drone count (docs/isaac_env.md), so a
+# 24-decision update is ~25-30 s and 300 updates ~2.5-3 hours per seed.
+# The budget is fixed here, before training; the final checkpoint is the one
+# reported, never a "best" one.
+algorithm:
+  updates: 600              # was 300 in train_v3 -- see the top
+  decisions_per_update: 24
+  checkpoint_every: 25
+  # Also the progress-shaping discount (the reward file above). 0.999, not the
+  # 0.995 first planned: over a ~225-decision mission, 0.995 discounts
+  # finishing (10 x 0.995^225 = 3.2) to about the value of landing at once
+  # (4 x 0.995^50 = 3.1), which would quietly undo the reward's "keep flying
+  # only if >= 70% likely to finish". At 0.999 that break-even stays ~72%
+  # mid-flight. Changed 2026-09-24, before any training.
+  discount: 0.999
+  gae_lambda: 0.95
+  learning_rate: 3.0e-4
+  schedule: fixed             # was adaptive (starting at 1e-3) in train_v2 -- see the top
+  desired_kl: 0.01
+  clip: 0.2
+  entropy_coef: 0.0          # was 0.005 in train_v1 -- see the top of this file
+  value_loss_coef: 1.0
+  epochs: 5
+  mini_batches: 4
+  max_grad_norm: 1.0
+
+# Policy and value networks: the same 27 observation_v2 inputs each (the
+# true fault never enters any network, CLAUDE.md §1.7), no running
+# observation normaliser (the contract already normalises with frozen
+# statistics; recomputing them is CLAUDE.md §8 #11).
+network:
+  hidden: [128, 128]
+  activation: elu
+  initial_action_noise: 1.0
+
+# Network output u -> action_v1 vector, element-wise: offset + scale * u,
+# then action_v1's own clip and land threshold. Centred on the nominal
+# flight, so an untrained policy flies the mission, and landing (land >= 0.5,
+# irreversible) needs u >= 4, so exploration noise almost never commits it
+# by accident. Folded into the exported network's last layer.
+action_map:
+  offset: [1.0, 0.0, -0.5]
+  scale: [0.5, 1.75, 0.25]
+
+# Drawn per episode, training only. AeroEnvCfg's own defaults stay M8b's,
+# which is what the agreement check and the Isaac scoring fly.
+randomization:
+  fault_probability: 0.8                  # 20% healthy
+  severity_range: [0.1, 1.0]
+  severity_focus:                         # new in train_v3 -- see the top
+    range: [0.3, 0.5]
+    share: 0.5
+  onset_range_s: [3.0, 35.0]
+  ramp_range_s: [1.0, 8.0]
+  step_fraction: 0.5                      # half sudden, half ramped
+  mass_scale: [0.95, 1.05]
+  wind_force_n: [0.0, 1.0]                # steady, horizontal, random direction (~0-5 m/s wind)
+  sensor_noise_scale: [0.5, 1.5]
+  detector:                               # multipliers on detector_sim_v1.yaml's fitted model
+    delay_scale: [0.5, 2.0]               # covers its known 0.58 s-late gap (docs/isaac_env.md)
+    false_alarm_rate_scale: [0.5, 2.0]
+    severity_noise_scale: [0.5, 2.0]
+    severity_bias_shift: [-0.03, 0.03]
+    descent_overread_scale: [0.5, 2.0]
+
+# Four fixed drones whose flights the dashboard draws (healthy and three
+# sudden faults at 15 s). A negligible slice of 16,384.
+example_flights:
+  severities: [0.0, 0.3, 0.4, 0.45]
+  onset_s: 15.0

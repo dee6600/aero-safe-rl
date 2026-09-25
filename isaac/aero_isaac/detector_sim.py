@@ -15,6 +15,13 @@ and how strongly it over-reads severity after a commanded descent starts
 (the measured over-read profile, scaled). False alarms are drawn as observed
 (length, height) pairs. Per 0.1 s tick: the
 fault probability, rotor, severity estimate, uncertainty and alarm.
+
+Training randomisation (M9): reset() optionally takes per-episode
+multipliers on the fitted model -- detection delay, false-alarm rate,
+severity error noise, descent over-read -- and a severity bias shift
+(`KNOBS`, ranges in the training settings in force, contracts.TRAIN_CONFIG). Left out, they are neutral
+(1, 1, 1, 1, 0) and no extra random numbers are drawn, so the output is
+exactly the fitted model's: the held-out check stays valid.
 """
 from __future__ import annotations
 
@@ -28,6 +35,9 @@ from aero_isaac.contracts import CONFIGS
 
 PARAMS_PATH = CONFIGS / "rl" / "detector_sim_v1.yaml"
 DESCENT_TRIGGER_M = -0.05     # fit_detector_sim.py: a descent starts when the commanded offset first goes below this
+# Per-episode training knobs and their neutral values (the training settings' randomization.detector).
+KNOBS = dict(delay_scale=1.0, false_alarm_rate_scale=1.0, severity_noise_scale=1.0,
+             severity_bias_shift=0.0, descent_overread_scale=1.0)
 
 
 def load_params(path: Path = PARAMS_PATH) -> dict:
@@ -85,15 +95,24 @@ class DetectorSim:
         self.burst_left = z()
         self.burst_level = z()
         self.run = z(torch.long)
+        self.knob = {k: z() + v for k, v in KNOBS.items()}
 
     def _u(self, *shape) -> torch.Tensor:
         return torch.rand(*shape, generator=self.gen, device=self.device)
 
     def reset(self, env_ids: torch.Tensor, target: torch.Tensor, rotor: torch.Tensor, onset: torch.Tensor,
-              ramp_s: torch.Tensor) -> None:
+              ramp_s: torch.Tensor, knobs: dict[str, torch.Tensor] | None = None) -> None:
         """New episode for env_ids: target severity (0 = healthy), faulted
-        rotor (-1 = none), onset time, ramp length (0 = a step)."""
+        rotor (-1 = none), onset time, ramp length (0 = a step), and
+        optionally per-episode `knobs` ({name in KNOBS: (k,)}; missing ones
+        neutral)."""
         k = len(env_ids)
+        unknown = set(knobs or {}) - set(KNOBS)
+        if unknown:
+            raise ValueError(f"unknown detector knobs {sorted(unknown)}")
+        for name, neutral in KNOBS.items():
+            v = (knobs or {}).get(name)
+            self.knob[name][env_ids] = neutral if v is None else v.to(self.knob[name].dtype)
         band = (torch.bucketize(target, self.bands, right=True) - 1).clamp(0, len(self.bands) - 2)
         is_ramp = ramp_s > 0
         step_delay = sample(self.step_delay_q[band], self._u(k))
@@ -101,6 +120,7 @@ class DetectorSim:
         # a ramp is detected when it reaches the level; one it never reaches, a step delay after it ends
         reach = (level / target.clamp(min=1e-6)).clamp(max=1.0) * ramp_s
         delay = torch.where(is_ramp, reach + torch.where(level >= target, step_delay, 0.0), step_delay)
+        delay = delay * self.knob["delay_scale"][env_ids]
         missed = self._u(k) < self.miss[is_ramp.long(), band]
         faulted = (rotor >= 0) & (target > 0)
         self.detect_at[env_ids] = torch.where(faulted & ~missed, onset + delay,
@@ -109,7 +129,8 @@ class DetectorSim:
         other = (rotor.clamp(min=0) + 1 + torch.randint(0, 3, (k,), generator=self.gen, device=self.device)) % 4
         self.rotor_named[env_ids] = torch.where(wrong, other, rotor.clamp(min=0))
         self.band[env_ids] = band
-        self.ar[env_ids] = torch.randn(k, generator=self.gen, device=self.device) * self.std[band]
+        self.ar[env_ids] = torch.randn(k, generator=self.gen, device=self.device) * self.std[band] * \
+            self.knob["severity_noise_scale"][env_ids]
         self.descent_at[env_ids] = math.inf
         self.descent_a[env_ids] = sample(self.descent_scale, self._u(k))
         self.burst_left[env_ids] = 0.0
@@ -123,7 +144,8 @@ class DetectorSim:
                                       self.descent_at)
         detected = t >= self.detect_at
 
-        start = (~detected) & (self.burst_left <= 0) & (self._u(n) < self.burst_rate)
+        start = (~detected) & (self.burst_left <= 0) & \
+            (self._u(n) < self.burst_rate * self.knob["false_alarm_rate_scale"])
         pick = self.bursts[torch.randint(0, len(self.bursts), (n,), generator=self.gen, device=self.device)]
         self.burst_left = torch.where(start, pick[:, 0], self.burst_left)
         self.burst_level = torch.where(start, pick[:, 1], self.burst_level)
@@ -131,11 +153,13 @@ class DetectorSim:
         self.burst_left = (self.burst_left - self.tick_s).clamp(min=0.0)
 
         self.ar = self.phi * self.ar + math.sqrt(1 - self.phi ** 2) * self.std[self.band] * \
-            torch.randn(n, generator=self.gen, device=self.device)
+            self.knob["severity_noise_scale"] * torch.randn(n, generator=self.gen, device=self.device)
         since_descent = t - self.descent_at
         idx = (since_descent.clamp(min=0) / self.descent_bin_s).long().clamp(max=len(self.descent_profile) - 1)
-        excess = torch.where(since_descent >= 0, self.descent_a * self.descent_profile[idx], torch.zeros_like(t))
-        sev_detected = (severity + self.bias[self.band] + self.ar + excess).clamp(0.0, 1.0)
+        excess = torch.where(since_descent >= 0, self.descent_a * self.knob["descent_overread_scale"] *
+                             self.descent_profile[idx], torch.zeros_like(t))
+        sev_detected = (severity + self.bias[self.band] + self.knob["severity_bias_shift"] + self.ar +
+                        excess).clamp(0.0, 1.0)
 
         p = torch.where(detected, sample(self.det_p, self._u(n)),
                         torch.where(in_burst, self.burst_level, sample(self.bg_p, self._u(n))))

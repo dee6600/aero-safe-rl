@@ -81,6 +81,19 @@ class MissionTracker:
             altitude_m=-position[:, 2],
             elapsed_s=torch.where(torch.isnan(self.t_start), torch.zeros_like(t), t - self.t_start))
 
+    def path_progress(self, position: torch.Tensor) -> torch.Tensor:
+        """(N,) share of the mission flown, in [0, 1]: legs completed plus the
+        horizontal share of the current leg covered, over the number of legs;
+        1 once the last leg is done. The Isaac side's training reward reads
+        it (reward.py); the PX4 side has no counterpart and needs none."""
+        k = self.leg.clamp(max=self.n_legs - 1)
+        w = self.legs[k]
+        length = torch.linalg.norm(w - self.legs[(k - 1).clamp(min=0)], dim=1)
+        covered = (1.0 - torch.linalg.norm(w - position[:, :2], dim=1) / length.clamp(min=1e-6)).clamp(0.0, 1.0)
+        frac = torch.where(length > 1e-6, covered, torch.zeros_like(covered))
+        p = (self.leg.to(position.dtype) + frac) / self.n_legs
+        return torch.where(self.done, torch.ones_like(p), p)
+
     # ------------------------------------------------------------ update
 
     def update(self, t: torch.Tensor, position: torch.Tensor, action: torch.Tensor) -> None:

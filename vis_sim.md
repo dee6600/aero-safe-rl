@@ -315,5 +315,4 @@ If section 5 is hung, use its own kill commands there, not this section.
 *(This file is a companion, not a milestone deliverable — it documents
 existing, already-tested functionality for visual inspection. If a future
 milestone adds a real visualization/dashboard track, that gets its own
-design, not a rewrite of this file — see the "Deferred, out of scope for
-now" note in `milestones.md`.)*
+design, not a rewrite of this file — see the "Phase 2" list in `milestones.md`.)*

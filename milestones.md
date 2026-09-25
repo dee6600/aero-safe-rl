@@ -5,7 +5,7 @@
 know each step actually works. `CLAUDE.md` holds the coding rules that apply to
 every milestone; `docs/parallelism.md` holds the verified multi-instance facts.
 
-Status: M0 (incl. addendum), M1, M1b, M3, M5, M6, M7 and M8 done. M4 substantially done
+Status: M0 (incl. addendum), M1, M1b, M3, M5, M6, M7, M8, M8b and M9 done. M4 substantially done
 (one deferred sim-marked test, `tests/sim/test_worker_restart.py`, still
 open — see M4). M2 substantially done —
 both known multi-instance bugs fixed and verified; a third, subtler bug
@@ -59,7 +59,7 @@ What this changes here:
   divergence band, and every multi-instance finding still stand, and the
   ROS 2 ↔ PX4 layer is untouched.
 
-Last revised: 2026-09-24.
+Last revised: 2026-09-25.
 
 ---
 
@@ -2913,6 +2913,407 @@ until it wins is how projects lose their integrity.
 stack.** A policy that beats the baseline in Isaac and not on PX4 has produced
 the RQ5 result, and that is what gets reported — not a quietly retuned run. The
 only Isaac-side figure in the paper is the training curve, labelled as such.
+(The transfer table also shows Isaac numbers, but only beside the same
+policy's PX4 numbers. It measures the crossing between simulators and never
+compares methods, planning.md §8.)
+
+**Started 2026-09-24.** Plan reviewed and approved (full text:
+`~/.claude/plans/lets-start-milestone-9-optimized-avalanche.md`; the essentials are below).
+
+### Design — approved 2026-09-24
+
+- **Library:** `rsl_rl` (user choice over the already-installed `rl_games`),
+  proximal policy optimisation. The network has 27 inputs, two hidden layers
+  of 128 units and 3 outputs. The value network sees the same 27 inputs; the
+  true fault never enters any network. There is no running observation
+  normaliser, because the contract already normalises with frozen
+  statistics. Evaluation uses the mean action, with no sampling.
+- **Reward `reward_v1.yaml`, replaced by `reward_v2.yaml` before any training** (task 2, below):
+  - one terminal value per outcome from `outcome_v1`: success +10, safe
+    landing +4, incomplete 0, crash −10. The user chose "keep flying only if
+    at least 70% likely to finish";
+  - touchdown speed ×(−1 per m/s);
+  - mission progress as exact progress-difference shaping, weight 2, with the
+    progress score zeroed at episode end. It guides learning without changing
+    which policy is best, so the four terminal values alone set the
+    preferences.
+
+  The reward never reads the true fault state.
+- **Action mapping**, centred on the nominal flight, with the network output
+  u: speed = 1 + 0.5u, altitude offset = 1.75u, land = −0.5 + 0.25u.
+  - An untrained policy flies the mission.
+  - The irreversible land needs u ≥ 4, so exploration almost never commits it
+    by accident.
+  - The mapping is folded into the exported network's last layer, so the PX4
+    side runs only the network and `ActionSpec.decode`.
+- **Training `train_v1.yaml`:** 16,384 drones, 24 decisions per update,
+  discount 0.999 (0.995 was planned; it made landing early almost as
+  valuable as finishing, see `train_v1.yaml`), 300 updates per seed (fixed
+  in advance), seeds 1–3. The
+  final checkpoint is reported, never a "best" one. Isaac takes about 1 s of
+  wall time per decision step whatever the drone count, so a seed takes
+  roughly 2.5–3 hours.
+- **Randomisation** (training only; `AeroEnvCfg` defaults stay M8b's for
+  agreement and evaluation):
+  - faults: 20% healthy, severity 0.1–1.0, onset 3–35 s, ramps of 1–8 s;
+  - mass ±5% and a steady wind force of 0–1 N;
+  - sensor noise ×0.5–1.5;
+  - simulated detector: delay, false-alarm rate, severity noise and descent
+    over-read each ×0.5–2.0, and severity bias ±0.03.
+- **Checkpoint:** `policy.pt` holds plain tensors and strings only. It
+  carries the action, observation and normalisation fingerprints, which the
+  PX4 side checks and refuses on mismatch. The reward, training, detector and
+  outcome fingerprints are recorded for provenance.
+- **Seeds on the PX4 side:** M9's check uses seed 9101. **M10's trial run and
+  full sweep use seeds from 10000 up.** Seeds used so far: 0 (M6), 8001–8501
+  (M8, M8b).
+
+### Tasks
+
+1. ✅ Contracts and reward: `reward_v1.yaml`, `train_v1.yaml`,
+   `isaac/aero_isaac/reward.py`, and the "Phase 2" list below.
+   **Done 2026-09-24.**
+   - The mission's progress share comes from a new
+     `MissionTracker.path_progress`.
+   - Progress shaping telescopes: over an episode it depends only on where
+     the flight ends, so wiggling earns nothing. Its discounted sum from the
+     ground is exactly zero.
+   - Tests: 13 in `isaac/tests/test_reward.py`. They include a parse-tree
+     scan showing `reward.py` never names a fault, a severity or a rotor.
+   - `rsl_rl` 5.0.1 was installed early, because the training config's
+     layout depends on it (task 3's install note).
+2. Trainable environment:
+   - the detector-simulator multipliers (at 1.0 identical to M8b);
+   - randomisation, the action mapping and the reward in `env.py`;
+   - logging without per-drone Python loops;
+   - running out of mission time ends an episode as incomplete instead of
+     cutting it off.
+   - **Gate before any training:** three scripted policies (nominal, react
+     with slow-and-low, react with land) must be ranked by the reward the
+     way their outcomes rank.
+   **Built 2026-09-24.**
+   - `detector_sim.py` gained per-episode multipliers. At neutral values
+     they draw no extra random numbers, so the output is bit-identical and
+     the held-out checks stay valid.
+   - `env.py` gained the action mapping, the randomisation (mass with
+     inertia, steady wind, sensor noise, detector), the reward, and four
+     traced example drones. Every finished episode becomes a row of an
+     on-card table (`records.py` holds the layout), with no per-drone Python
+     loop. `training_cfg()` builds the training settings from `train_v1.yaml`.
+   - Running out of mission time now ends an episode as incomplete.
+   - `probe.py smoke_train` (64 drones, random actions, 400 decisions):
+     - observations and rewards stay finite;
+     - every randomised value stays in range;
+     - rewards paid add up exactly to the recorded returns (−930.677 both
+       ways);
+     - the leak check passes with randomisation on;
+     - healthy and s < 0.35 drones finish the mission (35 of 35) even under
+       random commands.
+
+   **The gate caught a reward flaw** (`results/m9_reward_ranking_v1.json`).
+   - At s 0.2 and 0.3, "slow down and descend" scored 7.48 against flying
+     normally's 7.40, although both completed 100% of missions.
+   - Cause: `reward_v1` paid success after PX4's final landing. A drone at
+     2 m finishes that landing about 4 s sooner, so under the discount its
+     success was worth more. Flying low at the end was rewarded for no
+     reason.
+   - `reward_v2.yaml` pays success when the mission is completed, and takes
+     it back if the final landing is not judged a success. The four values
+     are unchanged.
+   - **Gate re-run on the same faults: passes**
+     (`results/m9_reward_ranking_v2.json`).
+
+     | Severity | Best | Flying normally | Best reaction |
+     |---|---|---|---|
+     | 0.2 | flying normally | 7.75 | 7.66 (slow and low) |
+     | 0.3 | flying normally | 7.74 | 7.63 (slow and low) |
+     | 0.4 | a reaction | 0.28 | 2.21 (slow and low) |
+     | 0.45 | a reaction | −11.81 | −8.95 (land) |
+
+     The outcomes are identical to the first run; only when success is paid
+     changed.
+   - Also changed before any training: the discount, from 0.995 to 0.999
+     (see `train_v1.yaml`).
+3. Training pipeline:
+   - install `rsl_rl` (checked with a dry run first);
+   - `isaac/aero_isaac/train.py` with `train`, `export`, `curves` and
+     `fixture` modes;
+   - a numbered TensorBoard dashboard: outcomes per severity band, reward
+     parts, behaviour, detector, training health, outcome-against-severity
+     pictures and example flights;
+   - a smoke run.
+   **Done 2026-09-24.**
+   - `rsl_rl` 5.0.1 installed with `tensordict` pinned to 0.8.3 (the release
+     for PyTorch 2.7). The install only added packages
+     (`docs/isaac_feasibility.md`).
+   - `train.py` does four things:
+     - trains with every setting from `train_v1.yaml`;
+     - saves a checkpoint every 25 updates and resumes from the latest;
+     - copies this checkout's code and settings into each run folder;
+     - exports `policy.pt`, the network with the action mapping folded in,
+       plus fingerprints, loadable without pickled code.
+   - The dashboard reads the environment's episode table once per update.
+     It has five numbered sections, charts that combine the severity bands,
+     and pictures at every checkpoint, and it writes `metrics.csv`.
+   - Trial at the full 16,384 drones (14 updates, resumed once):
+     - 24.5 s per update, so ~2 h per 300-update seed;
+     - 4.2 GB graphics memory, 6.3 GB computer memory peak;
+     - the PX4 side loads the exported file.
+   - Two dashboard faults were found and fixed on the trial: an outcome
+     column lost in `metrics.csv`, and a median that took the lower middle
+     value.
+   - **Frozen for training:** `train_v1.yaml` `1e64b7c9fa7e1003`,
+     `reward_v2.yaml` `137e9b040436ad84`.
+   - Tests: 6 in `test_export.py` and 3 in `test_dashboard.py`.
+4. ✅ PX4 side:
+   - `rl/policies/learned.py`, with the fingerprint check;
+   - `--policy learned`;
+   - a Wilson interval in `experiments/metrics.py`;
+   - the learned policy flown on 2 concurrent workers.
+   **Done 2026-09-24.**
+   - `LearnedPolicy` loads the exported file without pickled code, refuses
+     changed action, observation or normalisation fingerprints, and runs
+     `flatten_observation`, then the layers, then `ActionSpec.decode`.
+   - It reproduces the Isaac side's outputs on the 12 recorded observations
+     (`tests/fixtures/policy_export_v1.pt`, written by the Isaac export
+     code).
+   - `run_recovery.py` gained `--policy learned` and a `transfer` command
+     (Isaac against PX4 per severity, with Wilson intervals).
+   - Tests: 13 in `tests/test_learned_policy.py`, 4 in
+     `test_wilson_interval.py`, 2 transfer-table tests.
+   - **Live on 2 concurrent workers** with `train_v3` seed 1
+     (`tests/sim/test_policy_flight.py`, passed in 1 min 48 s, 0 processes
+     left):
+     - the healthy flight completed in 44.8 s;
+     - at s 0.45 the policy slowed to 0.4 and descended to −3.5 m, stayed
+       up until 55 s (43 s after onset), then touched down too hard.
+5. ✅ Train seeds 1–3. Seed 1 is reviewed before seeds 2–3 start. Score each
+   final policy in Isaac on the PX4 check's grid.
+   **Done 2026-09-25.** Three seeds under `train_v3`
+   (`results/m9_train/train_v3_seed_{1,2,3}`: checkpoints, `policy.pt`,
+   `metrics.csv`, `curves.png`, TensorBoard, code snapshot). They differ a
+   lot: the training crash rate at 0.35–0.45 over the last 50 updates was
+   23%, 30% and 32%, and all were still improving at update 300. Isaac
+   scores: `isaac_scores.json` in each run. The history below is in the
+   order it happened.
+   **Seed 1 under `train_v1` was stopped at update 62 of 300**
+   (`results/m9_train/stopped_train_v1_seed_1`, kept as a record).
+   - The exploration bonus (`entropy_coef` 0.005) was widening every
+     command's noise: speed 1.00 → 1.25, altitude → 1.22, land → 1.32.
+     Nothing in the task pushes back on the land command, whose irreversible
+     threshold only matters when noise crosses it.
+   - Accidental landings of healthy drones rose from 0.2% to 7.9%, and
+     mission success at 0.30–0.35 fell from 98% to 92%.
+   - The noise parameters jumping every update also kept tripping the
+     adaptive learning rate down to its 1e-5 floor, so the policy barely
+     changed.
+   - **`train_v2.yaml`** changes only that bonus, to 0, the value Isaac Lab's
+     own quadcopter task uses. Fingerprint `51b40d6cc3167530`; the reward is
+     still `reward_v2` `137e9b040436ad84`.
+   - Seeds 2 and 3 run under `train_v2` whatever seed 1 later scores on PX4.
+
+   **Seed 1 under `train_v2` learned not to panic, but not the manoeuvre.**
+   - Healthy and mild-fault drones finish 99.5–100% of missions, and
+     accidental landings are near zero.
+   - From update 25 to 200, the crash rate for faults of 0.35–0.45 stayed
+     at 33%, the same as no recovery, although the scripted check shows
+     reacting cuts it.
+   - Diagnosis:
+     - that band is about 9% of training episodes;
+     - noise that jitters the altitude command every 0.2 s averages out
+       under the rate limit, so exploration never produces a sustained
+       descent;
+     - the adaptive learning rate held the step size near 1e-4.
+   - **User decision: one focused retry.** `train_v3.yaml` (fingerprint
+     `8d6d29449609b2df`) makes two changes:
+     - half of faulty episodes draw their severity from 0.3–0.5 (the
+       0.35–0.45 band goes from about 9% to 24% of episodes);
+     - a fixed learning rate of 3e-4.
+
+     The evaluation is unchanged. `train_v2` seed 1 runs to 300 updates as
+     the fallback and the comparison.
+   - **Adoption rule, written before the trial:** v3 replaces v2 for seeds 2
+     and 3 only if both hold for its seed-1 final policy, scored in Isaac on
+     the fixed grid (256 drones per cell):
+     - its mean crash rate over the 0.40 and 0.45 cells is at least 5
+       points below v2 seed 1's;
+     - it completes at least 98% of missions at 0.20–0.35.
+
+     Otherwise seeds 2 and 3 use `train_v2`, and both results are
+     reported.
+   - **`train_v2` seed 1, final policy, scored in Isaac**
+     (`results/m9_train/train_v2_seed_1/isaac_scores.json`, 256 per cell):
+     - 100% success at 0–0.35;
+     - at 0.40, 94% safe landing and 6% crash;
+     - at 0.45 and above, 100% crash.
+     - Median touchdown speed against flying normally: 1.31 vs 1.58 m/s at
+       0.40, 2.56 vs 2.75 at 0.45, 3.46 vs 4.05 at 0.50, 5.26 vs 6.66 at
+       0.70.
+
+     It descends 1.1–1.4 m after a detection and never slows. The v3 bar is
+     therefore a mean crash rate over 0.40 and 0.45 of at most 48% (v2:
+     53%).
+   - Side finding, left unchanged mid-comparison: about 3% of training
+     episodes end "incomplete" at every severity. Most likely these are
+     faults starting during take-off (training onsets begin at 3 s). A
+     drone that never gets above 1 m is not judged landed, so it sits until
+     the 120 s timer. That wastes training time, but the policy cannot
+     choose it.
+   - **`train_v3` seed 1 passes the adoption rule; v3 is adopted**
+     (`results/m9_train/train_v3_seed_1/isaac_scores.json`, same grid and
+     seed as v2):
+
+     | Severity | v2: crash | v3: crash (safe landing) | Median touchdown, v2 → v3 |
+     |---|---|---|---|
+     | 0–0.35 | 0% (100% success) | 0% (100% success) | 0.70 → 0.70 m/s |
+     | 0.40 | 6% | 0% (99%) | 1.31 → 0.97 |
+     | 0.45 | 100% | 67% (33%) | 2.56 → 2.28 |
+     | 0.50 | 100% | 99% (1%) | 3.46 → 3.20 |
+     | 0.70 | 100% | 100% | 5.26 → 4.82 |
+
+     The mean crash rate over 0.40 and 0.45 went from 53% to 33.5%, against
+     a bar of ≤ 48%. Seeds 2 and 3 train under `train_v3`. These are Isaac
+     numbers: the PX4 check decides what is reported.
+   - **Seed 2 (`train_v3`), scored in Isaac, is much weaker than seed 1:**
+     - 0.40: 12% success, 72% safe landing, 15% crash;
+     - 0.45: 92% crash;
+     - mean over 0.40 and 0.45: 53.5%, against seed 1's 33.5%.
+
+     That is large variation between seeds with identical settings, and it
+     is reported as it is.
+   - **Isaac artifact found in seed 2's scoring.** 22 of 2048 drones
+     committed to land 1–2 s into the flight, still on the ground, so they
+     were judged "incomplete". They came in blocks of ten neighbouring
+     drones.
+     - Cause: while a drone sits on the ground spinning up, Isaac's contact
+       physics can spike the sideways-acceleration feature (to 20 standard
+       deviations here). Seed 2's policy answers that with a land command.
+     - PX4 consults the policy from arming too, so the two environments are
+       built the same way. But PX4's accelerations come from its filtered
+       sensor pipeline, where such spikes are unlikely.
+     - Not changed mid-comparison. Fix for later: filter the Isaac
+       acceleration feature the way PX4 does.
+6. ✅ PX4 check on seed 9101:
+   - five conditions (seeds 1–3, no recovery, rule-based), 16 healthy flights
+     plus 8 per severity at 0.2–0.7;
+   - the transfer table;
+   - `docs/rl_policy.md`.
+   **Done 2026-09-25.** 348 valid flights out of 360, with 12 start-up
+   restarts, each recorded. Runs: `results/m9_px4_*`; table:
+   `results/m9_transfer.{txt,json}`. Full write-up: `docs/rl_policy.md`.
+   - **Never panics.** 71 of 71 missions finished at 0.20–0.35 (95%
+     interval 95–100%), against the rule-based controller's 6 of 23 (26%,
+     13–46%). No landing was commanded on any of 45 healthy flights.
+   - **Finishes more missions at 0.40.** 9 of 23 (39%), against 0 of 8 for
+     no recovery and for the rule-based controller, which only landed.
+   - **No gain above the limit.** At 0.45 it crashed 22 of 24 (92%), against
+     6 of 6 and 6 of 7. Above that, every method crashed every flight.
+   - Against planning.md's criterion: it beats the rule-based controller on
+     success with intervals that do not overlap, but not on crash rate,
+     where the band is too narrow for a difference at 8 flights per cell.
+   - **Transfer:** all 24 Isaac crash rates fall inside the PX4 intervals.
+     Mission success agrees in 21 of 24 cells. The other three are all at
+     0.40, where PX4 finished more missions than Isaac predicted. A
+     plausible cause is PX4's hover-thrust estimator, which was not ported.
+7. ✅ **Extension: 600 updates (`train_v4`), 2026-09-25, overnight.**
+   - User decision: every v3 seed was still improving at update 300.
+   - `train_v4.yaml` (fingerprint `8c63f8f0fe741ce0`) is `train_v3` with a
+     budget of 600 updates; the parsed files differ in nothing else.
+   - Each seed resumes from its v3 final checkpoint (update 299, optimiser
+     state included). With a fixed learning rate that equals training 600
+     from the start, at half the cost. The v3 runs stay as the 300-update
+     results.
+   - Gazebo kept lean: only the three v4 policies fly the PX4 check, on the
+     same seed-9101 schedule. The no-recovery and rule-based runs flown on
+     that schedule are reused.
+   - One unattended chain (`results/m9_overnight.log`) does the rest:
+     - train seeds 1–3 to 600;
+     - draw the curves and score each in Isaac;
+     - fly each on PX4;
+     - build `results/m9_transfer_v4.{txt,json}`;
+     - run the stop sweep.
+   - **Seed 1 (v4)** finished cleanly. The training crash rate at 0.35–0.45
+     went from 23.2% (updates 250–299) to 17.3% (updates 550–599), flat
+     from about update 450, and it never landed a healthy drone.
+   - **Seed 2 (v4) learned to refuse to fly.** From about update 320 it
+     commits to land in the first second, before take-off, on almost every
+     flight: healthy flights it landed rose from 3% to 93%.
+     - A drone that never gets airborne ends "incomplete", worth 0.
+     - Under the training fault mix (80% faulty, half of those at 0.3–0.5),
+       flying on is worth about break-even on average (roughly −0.1),
+       because the crashes cost −10 plus touchdown speed. A guaranteed 0
+       from not flying is as good or better.
+     - This is a flaw in the reward together with the fault mix, not a
+       code bug. Longer training exposed it.
+     - Fixing it changes the design (for example, no land decision before
+       the drone is airborne, a realistic healthy share, or a negative
+       value for never flying). That is left for the user.
+   - **Gate added before any v4 policy was scored**, so Gazebo time is not
+     spent on a policy that will not fly: a v4 policy flies the PX4 check
+     only if, in Isaac, it finishes ≥ 98% of missions at every severity
+     from 0 to 0.35 (the v3 adoption bar). The chain was restarted with
+     the gate; seed 3 resumed from its update-300 checkpoint.
+   - **Done 2026-09-25 10:59**, then the stop sweep: 0 processes left.
+     Full results are in `docs/rl_policy.md` ("Extension").
+   - **Seed 3 (v4) did not change**: 32% training crash rate at 0.35–0.45
+     from update 250 to 600.
+   - **Isaac gate:**
+     - seed 1 passes (98–100% success up to 0.35);
+     - seed 2 fails (78% of healthy drones never took off), so it was not
+       flown on PX4;
+     - seed 3 passes.
+   - **PX4, seed 1 (v4)** is M9's best policy above the limit:
+     - at 0.45–0.50 it crashed 10 of 16 (62%, 39–82%), against 14 of 14
+       for no recovery (78–100%) and 14 of 15 for the rule-based
+       controller;
+     - it is the first policy to save any drone at 0.50;
+     - its touchdowns are softer everywhere (4.17 against 6.73 m/s at
+       0.70);
+     - the cost: 2 of 8 needless landings at 0.35, so 92% of missions
+       finished at 0.20–0.35 instead of 100%.
+
+     The intervals just overlap, so M10 decides.
+   - **PX4, seed 3 (v4)** matches its 300-update version in the fault band.
+     Two flights ended incomplete:
+     - at 0.20, the real detector over-read severity 0.56, so the policy
+       flew at a quarter of full speed and ran out of mission time;
+     - a healthy flight had PX4's final landing time out.
+   - Transfer for v4: 15 of 16 crash cells agree; mission success 12 of 16
+     (`results/m9_transfer_v4.txt`).
+   - **For M10:** the M9 result of record is the 300-update `train_v3`
+     set, three seeds, pre-registered. The v4 seed-1 policy is the strongest
+     single policy found. Before any further training, remove the "refuse
+     to fly" option (`docs/rl_policy.md`, "What to try next").
+
+### Tests (required)
+
+```
+isaac/tests/test_reward.py        outcome order, touchdown speed, progress shaping sums to zero, no fault input
+isaac/tests/test_detector_sim.py  each multiplier moves its measure; 1.0 changes nothing
+isaac/tests/test_env.py           randomisation in range, reward finite, leak check with randomisation on
+isaac/tests/test_export.py        exported network = trainer's mean action after the mapping; fingerprints
+tests/test_learned_policy.py      reproduces the Isaac fixture's actions; refuses changed fingerprints
+tests/sim/test_policy_flight.py   the learned policy flies on 2 concurrent workers
+```
+
+### Done when
+
+- [x] `reward_v1` and `train_v1` frozen before the first training update, and
+      any later version recorded along with its reason (`reward_v2`,
+      `train_v2`, `train_v3`: each with its reason at the top of the file).
+- [x] The reward-ranking check passed before training.
+- [x] Three seeds trained; curves, reward parts and final checkpoints archived.
+- [x] The PX4 side refuses a mismatched checkpoint and reproduces the Isaac
+      fixture's actions.
+- [x] Transfer table (Isaac against PX4, per policy and severity) exists.
+- [x] The PX4 comparison with no recovery and the rule-based controller is
+      reported as measured, whether the policy wins, ties or loses.
+- [x] Zero landings on healthy flights, or the count is reported (0 of 45 on
+      PX4).
+- [x] Both default test suites pass; simulator test on 2 workers; nothing
+      left running. Final check 2026-09-25: 414 PX4-side and 119 Isaac-side
+      fast tests; 14 Isaac-simulator and slow tests; the learned policy flown
+      on 2 concurrent workers; the stop sweep leaves 0 processes.
 
 ---
 
@@ -3043,17 +3444,34 @@ numbers, since it can't be written before the results it describes exist.)*
 
 ---
 
-## Deferred, out of scope for now
+## Phase 2 — after the first complete version
 
-A web dashboard was considered as an optional parallel track (not required by
-any research result). Cut to keep the project's surface area small — revisit
-only if actually wanted, and design it then.
+Ideas kept for after the first complete version (milestones M0–M10). Each is
+one entry here with a pointer, never half-built inside a current milestone.
 
-**Active fault diagnosis** (the policy performs small "probe" manoeuvres to make
-a weak rotor easier to detect; calibrated belief-output detector; RQ6) was
-proposed 2026-09-22 and deferred 2026-09-23 so the MVP finishes first. Full
-proposal, review corrections and a cheap first check to start from:
-`docs/change_active_diagnosis.md`.
+- **A mission-focused recovery policy** (added 2026-09-24, user request
+  during M9 planning). M9's policy is cautious: its reward keeps flying only
+  when it is at least 70% likely to finish (safe landing +4 against success
+  +10 and crash −10). For missions that must carry on, train a variant where
+  a safe landing is worth less, so it keeps flying at about 50–60% odds.
+  This needs a `reward_v2.yaml`, three training runs, and one PX4 check
+  against M9's policy on the same faults. The comparison is the result: how
+  much extra mission completion costs in crashes.
+- **Motor-level control for severe faults** (added 2026-09-24). Above
+  severity ≈ 0.5, no high-level command saves the drone, because PX4's
+  controller insists on not spinning (M8, `docs/recovery_baseline.md`).
+  Published work shows a quadcopter can stay up, even with a dead rotor, by
+  deliberately giving up yaw and spinning. That means commanding individual
+  motors, which replaces part of PX4 and breaks this project's
+  high-level-actions-only rule. It is a separate research extension.
+- **A web dashboard** for results and training runs. M9's training writes
+  every logged number to `results/m9_train/seed_<k>/metrics.csv` for it to
+  read. Design it then, against the pipeline as it actually is.
+- **Active fault diagnosis** (the policy performs small "probe" manoeuvres to
+  make a weak rotor easier to detect; calibrated belief-output detector;
+  RQ6), proposed 2026-09-22 and deferred 2026-09-23 so the first version
+  finishes first. Full proposal, review corrections and a cheap first check
+  to start from: `docs/change_active_diagnosis.md`.
 
 *(Isaac Sim was previously listed here as declined. That is no longer true —
 see D12. Isaac Lab is the training simulator as of 2026-09-21; Gazebo remains
@@ -3079,7 +3497,7 @@ Update this as milestones complete.
 | M7 | **Done** | 2026-09-23 | Was M6. Rotor-symmetric streaming GRU, 5-member ensemble (user-chosen over a 1D-CNN). On the test flights it detects weak faults (s 0.2–0.4) in a median 0.88 s vs the random forest's 1.18 s, identifies the rotor 98.6–99.8% of the time, and estimates severity with MAE ≤ 0.022. ECE is 0.004 and uncertainty→error AUROC 0.91. Tick AUROC ties the random forest; the model loses on false alarms (6 vs 4 short events in 0.69 h). Verified live on 2 concurrent workers (right rotor, ~0.55 s delay, p99 tick ≤ 10.7 ms), after fixing a real live-latency overshoot (p99 34.5 ms → stacked-weights streaming path). `error_model.json` written for M8b. Full results: `docs/detector_results.md`. |
 | M8 | **Done** | 2026-09-23 | Was M7. Physics limit: hover is impossible above rotor severity ≈ 0.41, so recovery can matter only for s ≈ 0.35–0.45. Built the 3-dimension action spec, the outcome rule (crash = tilt > 60° or touchdown > 2.0 m/s), the moving-setpoint mission tracker, policy-driven flight with ground-contact termination (episode schema v5), and the rule-based recovery controller, tuned offline then on the simulator. **Validation: the controller does not beat flying with no recovery.** It never landed a healthy drone, but its own recovery descent makes the detector over-read severity and trigger needless landings. Full results: `docs/recovery_baseline.md`. |
 | M8b | **Done** | 2026-09-24 | Isaac Lab training environment: PX4's x500 imported, PX4's flight controller ported to PyTorch, all 16 closed-loop agreement gates with PX4 pass. Simulated detector fitted to flights the detector never trained on; fresh confirmation run passes 13 of 14 checks, the miss (ramps at 0.5–0.7 detected 0.58 s late) recorded as a known gap. Up to 32,768 drones on one graphics card. Full results: `docs/isaac_env.md`. |
-| M9 | Not started | | Was M8. Rescoped by D12: trains in Isaac, evaluates on PX4, adds the RQ5 transfer table. |
+| M9 | **Done** | 2026-09-25 | Was M8. **Overnight extension to 600 updates (`train_v4`):** seed 1 improved again. On PX4 it crashed 10 of 16 at 0.45–0.50, against 14 of 14 for no recovery, and saved drones at 0.50 for the first time. Seed 3 was unchanged. Seed 2 learned to refuse to take off, a flaw in the reward together with the fault mix; it was not flown, by a gate written beforehand. The 300-update results below remain the result of record. Trained in Isaac Lab (`rsl_rl`, 16,384 drones, three seeds), checked on PX4. Two flaws were caught before any PX4 number existed: the reward-ranking check found `reward_v1` paying for flying low (fixed in `reward_v2`), and seed 1's review found the exploration bonus causing accidental landings (`train_v2`). `train_v3` (more training on 0.3–0.5 faults, fixed learning rate) was adopted by a rule written beforehand. **On PX4 (seed 9101, 348 valid flights):** the policy finished 71 of 71 missions at 0.20–0.35, against the rule-based controller's 6 of 23. It finished 9 of 23 at 0.40, against 0 for both baselines. It did not save drones at 0.45 (92% crash, against 100% and 86%). No landings on 45 healthy flights. **Transfer:** every Isaac crash rate falls inside the PX4 interval; at 0.40, PX4 finished more missions than Isaac predicted. Full results: `docs/rl_policy.md`. |
 | M10 | Not started | | Was M9. |
 | M11 | Not started | | Was M10. |
 | M12 | Not started | | Was M11. |

@@ -12,6 +12,12 @@ flight (task 3), the recovery controller's response sweep (task 5) and the valid
     # score a finished run (outcome per severity, experiments.metrics)
     python experiments/run_recovery.py report results/m8_check
 
+    # M9: the transfer table -- each learned policy's Isaac score beside its
+    # PX4 score, per severity, plus the baselines flown on the same faults
+    python experiments/run_recovery.py transfer \
+        --policy seed_1 results/m9_px4_seed_1 results/m9_train/seed_1/isaac_scores.json \
+        --baseline "no recovery" results/m9_px4_nominal --json results/m9_transfer.json
+
 Faults are single-rotor, step or ramp, with onset 5-25 s into the mission --
 early enough that every fault happens while the mission is still flying
 (M6's 5-40 s range let ~14% of faults land after the mission had ended).
@@ -158,6 +164,69 @@ def summarize(run_dir: Path, rows: Optional[pd.DataFrame] = None) -> dict:
     return out
 
 
+OUTCOME_NAMES = ("mission_success", "safe_landing", "crash", "incomplete")
+
+
+def transfer_table(policies: Sequence[tuple[str, dict, dict]], baselines: Sequence[tuple[str, dict]] = ()) -> dict:
+    """M9's transfer table (research question 5). `policies`: (label, PX4
+    summary, Isaac summary) per learned policy; `baselines`: (label, PX4
+    summary). Per severity: each policy's outcome rates in Isaac and on PX4
+    (PX4 with 95% Wilson intervals), the PX4-minus-Isaac gap, the spread of
+    the PX4 rates across the policies (the training seeds), and the
+    baselines' PX4 rates on the same faults. Rates only -- no reward is
+    computed on the PX4 side."""
+    from experiments.metrics import wilson_interval
+
+    def cell(c: dict, o: str) -> dict:
+        n = int(c["n"])
+        k = int(round(c[o] * n))
+        lo, hi = wilson_interval(k, n)
+        return dict(rate=c[o], n=n, lo=lo, hi=hi)
+
+    sevs = sorted({k for _, px4, isaac in policies for k in (*px4["by_severity"], *isaac["by_severity"])}
+                  | {k for _, b in baselines for k in b["by_severity"]}, key=float)
+    rows = []
+    for sev in sevs:
+        row: dict = {"severity": sev, "policies": {}, "baselines": {}, "seed_spread": {}}
+        for label, px4, isaac in policies:
+            pc, ic = px4["by_severity"].get(sev), isaac["by_severity"].get(sev)
+            entry = {}
+            for o in OUTCOME_NAMES:
+                entry[o] = dict(px4=cell(pc, o) if pc else None, isaac=ic[o] if ic else None,
+                                gap=(pc[o] - ic[o]) if pc and ic else None)
+            entry["px4_median_touchdown_speed_m_s"] = pc.get("median_touchdown_speed_m_s") if pc else None
+            entry["isaac_median_touchdown_speed_m_s"] = ic.get("median_touchdown_speed_m_s") if ic else None
+            row["policies"][label] = entry
+        for o in OUTCOME_NAMES:
+            vals = [px4["by_severity"][sev][o] for _, px4, _ in policies if sev in px4["by_severity"]]
+            row["seed_spread"][o] = dict(mean=float(np.mean(vals)), min=float(min(vals)), max=float(max(vals))) \
+                if vals else None
+        for label, b in baselines:
+            bc = b["by_severity"].get(sev)
+            row["baselines"][label] = {o: cell(bc, o) for o in OUTCOME_NAMES} if bc else None
+        rows.append(row)
+    return dict(policies=[p[0] for p in policies], baselines=[b[0] for b in baselines], rows=rows)
+
+
+def transfer_text(table: dict) -> str:
+    pct = lambda x: "  -  " if x is None else f"{100 * x:4.0f}%"   # noqa: E731
+    lines = ["Transfer table: Isaac vs PX4 (success / crash), PX4 95% Wilson interval in brackets"]
+    for row in table["rows"]:
+        lines.append(f"s={row['severity']}")
+        for label, e in row["policies"].items():
+            s, c = e["mission_success"], e["crash"]
+            ps, pc = s["px4"], c["px4"]
+            lines.append(
+                f"  {label:>12}: isaac {pct(s['isaac'])} / {pct(c['isaac'])}   px4 "
+                + (f"{pct(ps['rate'])} [{pct(ps['lo'])}-{pct(ps['hi'])}] / {pct(pc['rate'])} "
+                   f"[{pct(pc['lo'])}-{pct(pc['hi'])}] (n {ps['n']})" if ps else "  -"))
+        for label, b in row["baselines"].items():
+            if b:
+                lines.append(f"  {label:>12}: px4 {pct(b['mission_success']['rate'])} / {pct(b['crash']['rate'])} "
+                             f"(n {b['crash']['n']})")
+    return "\n".join(lines)
+
+
 def report_text(summary: dict) -> str:
     lines = [f"{summary['run_dir']}: {summary['n_valid']} valid episodes",
              f"{'sev':>5} {'n':>3} {'success':>8} {'landed':>7} {'crash':>6} {'incompl':>8} "
@@ -174,10 +243,11 @@ def main(argv=None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fly")
     f.add_argument("--run-id", required=True)
-    f.add_argument("--policy", default="nominal", choices=["nominal", "rule_based", "constant"])
+    f.add_argument("--policy", default="nominal", choices=["nominal", "rule_based", "constant", "learned"])
     f.add_argument("--constant-action", type=float, nargs=3, default=None,
                    help="the constant policy's action: speed_scale altitude_offset_m land")
-    f.add_argument("--policy-config", default=None)
+    f.add_argument("--policy-config", default=None,
+                   help="rule_based: its yaml; learned: the exported policy.pt")
     f.add_argument("--detector", default=None)
     f.add_argument("--severities", type=float, nargs="+", required=True)
     f.add_argument("--episodes-per-severity", type=int, required=True)
@@ -190,9 +260,21 @@ def main(argv=None) -> None:
     r = sub.add_parser("report")
     r.add_argument("run_dir")
     r.add_argument("--json", default=None, help="also write the summary here")
+    t = sub.add_parser("transfer", help="M9: Isaac vs PX4 per learned policy, plus baselines")
+    t.add_argument("--policy", nargs=3, action="append", required=True, metavar=("LABEL", "PX4_RUN", "ISAAC_JSON"))
+    t.add_argument("--baseline", nargs=2, action="append", default=[], metavar=("LABEL", "PX4_RUN"))
+    t.add_argument("--json", default=None)
     args = ap.parse_args(argv)
     if args.cmd == "fly":
         fly(args)
+    elif args.cmd == "transfer":
+        table = transfer_table(
+            [(label, summarize(Path(run)), json.loads(Path(isaac).read_text())["summary"])
+             for label, run, isaac in args.policy],
+            [(label, summarize(Path(run))) for label, run in args.baseline])
+        print(transfer_text(table))
+        if args.json:
+            Path(args.json).write_text(json.dumps(table, indent=2))
     else:
         summary = summarize(Path(args.run_dir))
         print(report_text(summary))

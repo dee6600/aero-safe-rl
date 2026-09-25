@@ -286,6 +286,13 @@ ours runs the full controller and rotor model on every physics step. Even at
 8,192, 3 million decisions take about 6 minutes, so M9's sample budget can
 be far larger than planned.
 
+**Known artifact, found in M9.** While a drone sits on the ground spinning up,
+Isaac's contact physics can spike the acceleration features, up to 20
+standard deviations, sometimes in blocks of neighbouring drones. One trained
+policy answered with a land command before take-off. PX4's filtered sensor
+pipeline does not show this. Details and a suggested fix:
+`docs/rl_policy.md` (transfer table section).
+
 **Clip:** `results/m8b_isaac_clip.mp4` (and a smaller copy in the README,
 `docs/media/isaac_four_drones.gif`): four drones at severities 0, 0.3, 0.45
 and 0.7, fixed camera, 4× speed.

@@ -8,7 +8,7 @@
 
 *Spot a weakening motor before the flight controller does, then decide how to finish the mission safely, without ever touching the low-level controller.*
 
-[![Status](https://img.shields.io/badge/status-M9%20next-brightgreen)](#-mission-progress)
+[![Status](https://img.shields.io/badge/status-M10%20next-brightgreen)](#-mission-progress)
 [![PX4](https://img.shields.io/badge/PX4-v1.17.0%20(stock)-blue)](https://github.com/PX4/PX4-Autopilot)
 [![Gazebo](https://img.shields.io/badge/Gazebo-Harmonic%208.15-orange)](https://gazebosim.org/)
 [![Isaac Sim](https://img.shields.io/badge/Isaac%20Sim-5.1%20%2B%20Isaac%20Lab-76B900)](https://isaac-sim.github.io/IsaacLab/)
@@ -161,6 +161,7 @@ measured.
 | ⚡ **24,297 decisions/s** | our full Isaac training environment at 32,768 parallel drones, on a laptop **RTX 2070** (Isaac's stated minimum is an RTX 4080), using 4.6 of 8 GB of graphics memory ([details](docs/isaac_env.md)) |
 | 🤝 **16 / 16** | closed-loop checks where the Isaac drone flies like PX4's: mission time, speed, motor effort, crash severity, touchdown speed ([details](docs/isaac_env.md)) |
 | 🪨 **s ≈ 0.42** | the physics cliff: above this rotor severity an x500 cannot hover, whatever any controller does ([details](docs/recovery_baseline.md)) |
+| 🧠 **71 / 71** | missions at mild faults (severity 0.20–0.35) finished on PX4 by the policy trained in Isaac, against 6 / 23 for the tuned rule-based controller, which gave the rest up ([details](docs/rl_policy.md)) |
 | 🎯 **6.44 ± 0.57 m** | position RMSE noise floor of a *healthy* mission ([details](docs/baseline_results.md)) |
 | 🔁 **σ = 0.083 m** | reproducibility at a fixed seed after a hard reset ([details](docs/baseline_results.md)) |
 | 🏃 **~8×** | real-time simulation speed before this machine runs out of CPU ([details](docs/simulation_notes.md)) |
@@ -169,7 +170,7 @@ measured.
 ## 🛫 Mission progress
 
 ```text
-M0 ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱ M13      12 of 17 milestones done · M9 next
+M0 ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱ M13      13 of 17 milestones done · M10 next
 ```
 
 | # | Milestone | Status | What it bought us |
@@ -186,8 +187,8 @@ M0 ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱ M13      12 of 17 milesto
 | M7 | AI fault detector | ✅ | Catches a mild fault in a median 0.88 s and names the right rotor 98.6–99.8% of the time |
 | M8 | Rule-based recovery baseline | ✅ | The honest opponent. Finding: it does *not* beat flying on, because its own descent fools the detector ([details](docs/recovery_baseline.md)) |
 | M8b | **Isaac Lab training environment** | ✅ | The gym: PX4's x500 and controller in PyTorch, 16/16 agreement checks, up to 32,768 drones ([details](docs/isaac_env.md)) |
-| M9 | RL recovery policy (train Isaac, eval PX4) | ⏭️ next | The backseat navigator |
-| M10 | Full experiments + results | ⬜ | 📄 First publishable result |
+| M9 | RL recovery policy (train Isaac, eval PX4) | ✅ | The backseat navigator. On PX4 it never panics (71/71 missions finished at mild faults, against 6/23 for the rule-based controller) and finishes 39% of missions right below the physics cliff, where the baselines finish none. Its Isaac score carries over to PX4. Trained longer, the best seed brought crashes at 0.45–0.50 down to 10 of 16, against 14 of 14 with no recovery; M10's larger runs will confirm it ([details](docs/rl_policy.md)) |
+| M10 | Full experiments + results | ⏭️ next | 📄 First publishable result |
 | M11 | Generalization tests | ⬜ | Wind, new faults, new timings |
 | M12 | Hexacopter extension | ⬜ | Six rotors, same brain |
 | M13 | Paper + reproducibility package | ⬜ | 🎓 |
@@ -304,8 +305,10 @@ checks pass.
 🎯 **First result worth showing anyone** landed with **M7**: a detector that
 spots a weakening motor PX4 never notices ([results](docs/detector_results.md)).
 The rule-based recovery baseline (M8) showed why this is hard: a recovery
-manoeuvre can itself mislead the detector. The learned policy (M9) trains in
-Isaac Lab against a detector simulator that reproduces exactly that.
+manoeuvre can itself mislead the detector. The learned policy (M9) trained in
+Isaac Lab against a detector simulator that reproduces exactly that. On PX4 it
+never gives up a mission it could finish, and it finishes some right below
+the physics cliff that the baselines only land ([results](docs/rl_policy.md)).
 📄 **First publishable result** lands at the end of **M10**.
 
 <details>

@@ -165,3 +165,76 @@ def test_parameters_record_their_source():
     assert p["fitted_from"]["held_out"] == ["m8b_detector_confirm_nominal", "m8b_detector_confirm_recovery"]
     assert not set(p["fitted_from"]["held_out"]) & set(p["fitted_from"]["live_runs"])
     assert p["fitted_from"]["detector_checkpoint_digest"]
+
+
+# ---------------------------------------------------------------- M9 training knobs
+
+def _run_knobs(knobs, n=2000, seconds=40.0, seed=11, target=0.4, ramp=0.0, descent_s=math.inf):
+    """Fly n identical episodes (fault at 10 s) through the simulator; per
+    tick record the estimate, probability and true severity."""
+    sim = DetectorSim(n, generator=torch.Generator().manual_seed(seed))
+    k = {name: torch.full((n,), float(v)) for name, v in knobs.items()} if knobs is not None else None
+    sim.reset(torch.arange(n), target=torch.full((n,), target), rotor=torch.zeros(n, dtype=torch.long),
+              onset=torch.full((n,), 10.0), ramp_s=torch.full((n,), ramp), knobs=k)
+    rec = {"p": [], "est": [], "sev": [], "t": []}
+    for i in range(int(seconds / DT)):
+        t = torch.full((n,), i * DT)
+        frac = ((t - 10.0) / ramp).clamp(0, 1) if ramp > 0 else torch.ones(n)
+        sev = torch.where(t >= 10.0, target * frac, torch.zeros(n))
+        out = sim.step(t=t, severity=sev, offset_cmd=torch.where(t >= descent_s, torch.full((n,), -3.0),
+                                                                  torch.zeros(n)))
+        for key, v in (("p", out["p_fault"]), ("est", out["severity"]), ("sev", sev), ("t", t)):
+            rec[key].append(v)
+    return sim, {key: torch.stack(v, 1) for key, v in rec.items()}
+
+
+def test_neutral_knobs_change_nothing():
+    """Explicit neutral knobs give bit-identical output to no knobs at all,
+    from the same random stream -- the held-out check above stays valid."""
+    _, a = _run_knobs(None, n=300, ramp=3.0, descent_s=20.0)
+    _, b = _run_knobs(dict(delay_scale=1, false_alarm_rate_scale=1, severity_noise_scale=1,
+                           severity_bias_shift=0, descent_overread_scale=1), n=300, ramp=3.0, descent_s=20.0)
+    for key in a:
+        assert torch.equal(a[key], b[key]), key
+
+
+def test_delay_scale_stretches_detection_time():
+    base, _ = _run_knobs(None, ramp=4.0, seconds=0.1)
+    slow, _ = _run_knobs(dict(delay_scale=2.0), ramp=4.0, seconds=0.1)
+    d0, d1 = (base.detect_at - 10.0).median(), (slow.detect_at - 10.0).median()
+    assert float(d1) == pytest.approx(2 * float(d0), rel=0.05)
+
+
+def test_false_alarm_rate_scale_multiplies_bursts():
+    def bursts(scale):
+        _, r = _run_knobs(dict(false_alarm_rate_scale=scale), target=0.0, n=400, seconds=300.0)
+        return sum(len(_bursts(r["p"][i] >= 0.1)) for i in range(r["p"].shape[0]))
+    b1, b3 = bursts(1.0), bursts(3.0)
+    assert 2.4 <= b3 / b1 <= 3.4
+
+
+def test_noise_scale_and_bias_shift_move_the_estimate_error():
+    def err(knobs):
+        sim, r = _run_knobs(knobs, seconds=30.0)
+        detected = (r["t"] >= sim.detect_at[:, None] + 2.0)   # well after detection, flying level
+        return (r["est"] - r["sev"])[detected]
+    e0, e_noise, e_bias = err(None), err(dict(severity_noise_scale=2.0)), err(dict(severity_bias_shift=0.03))
+    assert float(e_noise.std()) == pytest.approx(2 * float(e0.std()), rel=0.1)
+    assert float(e_bias.mean() - e0.mean()) == pytest.approx(0.03, abs=0.004)
+
+
+def test_descent_overread_scale_scales_the_over_read():
+    def over(scale):
+        _, r = _run_knobs(dict(descent_overread_scale=scale), seconds=26.0, descent_s=20.0)
+        sel = r["t"] >= 21.0
+        return float((r["est"] - r["sev"])[sel].mean())
+    _, r = _run_knobs(None, seconds=19.9)
+    level = float((r["est"] - r["sev"])[r["t"] >= 15.0].mean())    # the error before any descent
+    assert (over(2.0) - level) == pytest.approx(2 * (over(1.0) - level), rel=0.1)
+
+
+def test_unknown_knob_is_refused():
+    sim = DetectorSim(1)
+    with pytest.raises(ValueError):
+        sim.reset(torch.arange(1), target=torch.zeros(1), rotor=torch.full((1,), -1), onset=torch.zeros(1),
+                  ramp_s=torch.zeros(1), knobs={"latency": torch.ones(1)})

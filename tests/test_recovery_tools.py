@@ -129,3 +129,38 @@ def test_candidates_are_valid_fsm_configs(tmp_path):
     assert cfgs["fsm_degraded_high"].degraded_altitude_offset_m == 0.0
     assert cfgs["fsm_suspect_descend"].suspected_altitude_offset_m == -3.0
     assert cfgs["fsm_base"] == load_fsm_config("configs/rl/fsm_v1.yaml")
+
+
+# ---------------------------------------------------------------- M9 transfer table
+
+def _rates_summary(cells: dict) -> dict:
+    """{severity: (n, success, landing, crash)} -> a summarize()-shaped dict."""
+    out = {"by_severity": {}}
+    for sev, (n, s, l, c) in cells.items():
+        out["by_severity"][f"{sev:.2f}"] = dict(n=n, mission_success=s, safe_landing=l, crash=c,
+                                                incomplete=1 - s - l - c, median_touchdown_speed_m_s=1.0)
+    return out
+
+
+def test_transfer_table_puts_isaac_beside_px4_with_intervals():
+    from experiments.run_recovery import transfer_table, transfer_text
+    px4_a = _rates_summary({0.4: (8, 0.25, 0.75, 0.0), 0.45: (8, 0.0, 0.5, 0.5)})
+    px4_b = _rates_summary({0.4: (8, 0.5, 0.5, 0.0), 0.45: (8, 0.0, 0.25, 0.75)})
+    isaac = _rates_summary({0.4: (256, 0.6, 0.4, 0.0), 0.45: (256, 0.0, 0.8, 0.2)})
+    nominal = _rates_summary({0.4: (8, 0.0, 1.0, 0.0), 0.45: (8, 0.0, 0.0, 1.0)})
+    t = transfer_table([("seed_1", px4_a, isaac), ("seed_2", px4_b, isaac)], [("no recovery", nominal)])
+    row = {r["severity"]: r for r in t["rows"]}["0.45"]
+    crash = row["policies"]["seed_1"]["crash"]
+    assert crash["isaac"] == 0.2 and crash["px4"]["rate"] == 0.5 and crash["gap"] == pytest.approx(0.3)
+    assert crash["px4"]["lo"] < 0.5 < crash["px4"]["hi"] and crash["px4"]["n"] == 8
+    assert row["seed_spread"]["crash"] == dict(mean=0.625, min=0.5, max=0.75)
+    assert row["baselines"]["no recovery"]["crash"]["rate"] == 1.0
+    assert "s=0.45" in transfer_text(t)
+
+
+def test_transfer_table_tolerates_a_severity_flown_on_one_side_only():
+    from experiments.run_recovery import transfer_table
+    t = transfer_table([("seed_1", _rates_summary({0.4: (8, 0.5, 0.5, 0.0)}), _rates_summary({0.7: (64, 0.0, 0.0, 1.0)}))])
+    by = {r["severity"]: r for r in t["rows"]}
+    assert by["0.40"]["policies"]["seed_1"]["crash"]["isaac"] is None
+    assert by["0.70"]["policies"]["seed_1"]["crash"]["px4"] is None

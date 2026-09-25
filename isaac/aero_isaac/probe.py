@@ -4,6 +4,7 @@
     python -m aero_isaac.probe smoke --out smoke.json          # what isaac/tests/test_env.py checks
     python -m aero_isaac.probe throughput --num-envs 8192 --out ../results/m8b_throughput.json
     python -m aero_isaac.probe clip --out ../results/m8b_isaac_clip.mp4
+    python -m aero_isaac.probe smoke_train --out smoke_train.json   # M9: training settings
 
 smoke: 16 drones at severities 0 / 0.3 / 0.45 / 0.7 under the nominal action,
 until every drone has finished an episode. Records the observation's shape
@@ -16,6 +17,13 @@ throughput: decisions per second, simulated drone-seconds per second, and
 memory, at a given drone count (M3b measured the stock quadcopter task).
 clip: 4 drones, fixed zoomed-out camera, one frame per decision, played at
 4x real time.
+smoke_train (M9): 64 drones under the training settings in force (contracts.TRAIN_CONFIG)
+(randomisation, action mapping, example flights), driven by random
+network-scale actions for 400 decisions. Records whether observations and
+rewards stay finite, every finished episode's record (so the randomisation
+drawn can be checked against its ranges), the sum of the rewards each
+finished episode was paid against its recorded return, and the leak check
+with randomisation on.
 """
 from __future__ import annotations
 
@@ -98,6 +106,39 @@ def _leak_check(env) -> dict:
                 faulted_drones=int((saved["_fault_rotor"] >= 0).sum()))
 
 
+def smoke_train(num_envs: int = 64, decisions: int = 400) -> dict:
+    import torch
+    from aero_isaac.contracts import load_train_config
+    from aero_isaac.env import AeroEnv, training_cfg
+    from aero_isaac.records import EPISODE_FIELDS, RECORD_CAPACITY
+    train = load_train_config()
+    env = AeroEnv(training_cfg(train, num_envs=num_envs, seed=5))
+    obs, _ = env.reset()
+    gen = torch.Generator(device=env.device).manual_seed(3)
+    paid = torch.zeros(num_envs, device=env.device)
+    paid_finished = 0.0
+    finite = dict(obs=bool(torch.isfinite(obs["policy"]).all()), reward=True)
+    leak = None
+    for step in range(decisions):
+        u = torch.randn(num_envs, 3, generator=gen, device=env.device)
+        obs, rew, terminated, truncated, _ = env.step(u)
+        finite["obs"] &= bool(torch.isfinite(obs["policy"]).all())
+        finite["reward"] &= bool(torch.isfinite(rew).all())
+        paid += rew
+        done = terminated | truncated
+        paid_finished += float(paid[done].sum())
+        paid[done] = 0.0
+        if step == 200:
+            leak = _leak_check(env)
+    n = min(env.records_written, RECORD_CAPACITY)
+    rows = env.records[:n]
+    rows = rows[rows[:, 0] > 0].cpu().tolist()
+    return dict(num_envs=num_envs, decisions=decisions, finite=finite, leak=leak, fields=list(EPISODE_FIELDS),
+                records=rows, reward_paid_finished=paid_finished,
+                randomization=train["randomization"], example_flights=train["example_flights"],
+                example_traces_finished=int(torch.isfinite(env.trace_done[:, 0, 0]).sum()))
+
+
 def throughput(num_envs: int, decisions: int) -> dict:
     import torch
     env = _env(num_envs)
@@ -144,7 +185,7 @@ def clip(out_path: str) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=("smoke", "throughput", "clip"))
+    ap.add_argument("mode", choices=("smoke", "smoke_train", "throughput", "clip"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--num-envs", type=int, default=8192)
     ap.add_argument("--decisions", type=int, default=100)
@@ -154,6 +195,8 @@ def main(argv=None) -> int:
     AppLauncher(headless=True, enable_cameras=args.mode == "clip")
     if args.mode == "smoke":
         result = smoke()
+    elif args.mode == "smoke_train":
+        result = smoke_train()
     elif args.mode == "throughput":
         result = throughput(args.num_envs, args.decisions)
     else:
@@ -161,7 +204,7 @@ def main(argv=None) -> int:
     if args.mode != "clip":
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(result, indent=2))
-    print(json.dumps({k: v for k, v in result.items() if k != "first_episode"}), flush=True)
+    print(json.dumps({k: v for k, v in result.items() if k not in ("first_episode", "records")}), flush=True)
     sys.stdout.flush()
     os._exit(0)   # Isaac Sim's shutdown never returns headless
 

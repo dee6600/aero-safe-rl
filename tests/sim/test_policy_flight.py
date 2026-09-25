@@ -9,6 +9,13 @@ concurrent workers, each in its own spawned process (CLAUDE.md §3.3).
               commit to land after onset and never before it.
 
 Needs results/m7_detector_v1/detector.pt.
+
+M9 task 4 adds a second two-worker test: the trained policy exported from
+Isaac (results/m9_train/train_v3_seed_1/policy.pt), healthy on instance 0 and rotor 2
+at s = 0.45 on instance 1, both at once. It checks the mechanics: valid
+episodes, the policy consulted at 5 Hz, its provenance recorded, and every
+command within action_v1. It does not check how well the policy flies --
+that is the PX4 check's job (milestones.md M9 task 6).
 """
 from __future__ import annotations
 
@@ -25,6 +32,11 @@ ONSET_S = 12.0
 CASES = [  # (instance, policy, policy_config, rotor, severity)
     (0, "nominal", None, None, 0.0),
     (1, "rule_based", "configs/rl/fsm_v1.yaml", 2, 0.6),
+]
+LEARNED = REPO / "results" / "m9_train" / "train_v3_seed_1" / "policy.pt"
+LEARNED_CASES = [
+    (0, "learned", str(LEARNED), None, 0.0),
+    (1, "learned", str(LEARNED), 2, 0.45),
 ]
 
 
@@ -120,3 +132,47 @@ def test_policy_driven_flight_live_on_two_workers(sim_workers_0_1_x500_aero, tmp
     assert landed_at.min() >= ONSET_S, "FSM committed to land before the fault"
     assert not st1[elapsed < ONSET_S].policy_state.isin(["RECOVERING", "ABORTED"]).any()
     assert s1["termination_reason"] in ("recovery_landed", "ground_contact")
+
+
+def _fly_all(cases, tmp_path):
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=_fly, args=(*case, str(tmp_path), queue)) for case in cases]
+    for p in procs:
+        p.start()
+    results = {}
+    for _ in procs:
+        r = queue.get(timeout=800)
+        results[r["instance"]] = r
+    for p in procs:
+        p.join(timeout=60)
+    for r in results.values():
+        assert "error" not in r, f"instance {r['instance']}: {r.get('error')}"
+    return results
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.skipif(not CHECKPOINT.exists(), reason="train the detector first (ai/detector/train.py)")
+@pytest.mark.skipif(not LEARNED.exists(), reason="train and export the M9 policy first (isaac/aero_isaac/train.py)")
+def test_learned_policy_flies_live_on_two_workers(sim_workers_0_1_x500_aero, tmp_path):
+    from ai.detector.model import file_digest
+    from experiments.metrics import classify_outcome
+    from rl.policies.base_policy import load_action_spec
+
+    spec = load_action_spec()
+    results = _fly_all(LEARNED_CASES, tmp_path)
+    for instance, severity in ((0, 0.0), (1, 0.45)):
+        s = results[instance]["summary"]
+        st = pd.read_parquet(tmp_path / "m8_policy_flight_test" / f"worker_{instance}"
+                             / "episode_ep_0000_steps.parquet")
+        print(f"learned, s = {severity}: {s['termination_reason']} in {s['t_sim_duration_s']:.1f}s, "
+              f"outcome {classify_outcome(s['termination_reason'], st).outcome.value}, "
+              f"speed {st.action_speed_scale.min():.2f}-{st.action_speed_scale.max():.2f}, "
+              f"offset down to {st.action_altitude_offset_m.min():.2f} m, land {bool(st.action_land.any())}")
+        assert s["valid"] and s["termination_reason"] in ("completed", "recovery_landed", "ground_contact")
+        assert s["policy_name"] == "learned" and s["policy_config_digest"] == file_digest(LEARNED)
+        assert st.action_speed_scale.between(spec.low[0], spec.high[0]).all()
+        assert st.action_altitude_offset_m.between(spec.low[1], spec.high[1]).all()
+        assert st.det_p_fault.notna().all()
+        if severity > 0:
+            assert s["fault_confirmed_applied"]

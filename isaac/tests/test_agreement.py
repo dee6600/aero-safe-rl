@@ -31,3 +31,32 @@ def test_gates():
     px4_far = summarize([_ep(0.0, 0, 0.7, dur=60.0)] + [_ep(0.45, 2, 4.0)])
     rows = {r["measure"]: r["passed"] for r in compare(isaac, px4_far)}
     assert not rows["healthy mission time (s)"] and not rows["median touchdown speed at s = 0.45 (m/s)"]
+
+
+# ---------------------------------------------------------------- M9 reward-ranking gate
+
+def _ranked(returns: dict) -> dict:
+    """returns: {severity: {policy: mean return}} -> rank() on 2 drones per cell."""
+    from aero_isaac.agreement import rank
+    eps = [dict(severity=s, policy=p, outcome=0, discounted_return=r)
+           for s, row in returns.items() for p, r in row.items() for _ in range(2)]
+    return rank(eps)
+
+
+def _grid(nominal_low, react_low, nominal_high, react_high):
+    row = lambda n, r: {"nominal": n, "react_slow_low": r, "react_land": r - 1}   # noqa: E731
+    return {0.2: row(nominal_low, react_low), 0.3: row(nominal_low, react_low),
+            0.4: row(nominal_high, react_high), 0.45: row(nominal_high, react_high)}
+
+
+def test_ranking_gate_passes_when_the_reward_prefers_the_right_thing():
+    out = _ranked(_grid(nominal_low=8.0, react_low=5.0, nominal_high=-9.0, react_high=2.0))
+    assert out["passed"] and len(out["checks"]) == 4
+
+
+def test_ranking_gate_fails_if_reacting_wins_where_the_mission_finishes_unaided():
+    assert not _ranked(_grid(nominal_low=3.0, react_low=5.0, nominal_high=-9.0, react_high=2.0))["passed"]
+
+
+def test_ranking_gate_fails_if_carrying_on_wins_where_the_drone_falls():
+    assert not _ranked(_grid(nominal_low=8.0, react_low=5.0, nominal_high=3.0, react_high=2.0))["passed"]

@@ -47,6 +47,26 @@ version friction between `isaacsim-kernel`'s pins and `rl-games`'/`ipython`'s)
 — both packages still imported and ran correctly; noted here so a future
 session doesn't mistake the warnings for a real failure.
 
+**M9 added the training library `rsl_rl` (2026-09-24, user choice over
+`rl_games`).** Installed with pip directly rather than through
+`./isaaclab.sh --install rsl_rl`, so that one dependency could be pinned:
+
+```bash
+source scripts/activate_isaac.sh
+pip install "rsl-rl-lib==5.0.1" "tensordict==0.8.3"
+```
+
+`rsl-rl-lib==5.0.1` is the version Isaac Lab's own `isaaclab_rl` extras pin.
+Left unpinned, pip would pull `tensordict` 0.14.2, which is built for newer
+PyTorch releases than the 2.7.0 Isaac Sim ships with. 0.8.3 is the release
+for PyTorch 2.7.
+
+Before installing, a `pip install --dry-run` confirmed the install only adds
+packages and changes none. A `pip freeze` diff afterwards confirmed it: ten
+new packages (`rsl-rl-lib`, `tensordict`, `onnxscript`, `onnx-ir`,
+`GitPython`, `gitdb`, `smmap`, `orjson`, `importlib_metadata`, `zipp`), with
+torch still 2.7.0+cu128.
+
 ---
 
 ## Method

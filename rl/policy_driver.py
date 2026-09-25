@@ -46,8 +46,8 @@ def _no_detection():
 class RecoveryConfig:
     """Which policy and detector a run flies with. Paths are repo-relative or
     absolute. The default is no recovery and no detector."""
-    policy: str = "nominal"                    # "nominal" | "rule_based" | "constant"
-    policy_config: Optional[str] = None        # e.g. configs/rl/fsm_v1.yaml
+    policy: str = "nominal"                    # "nominal" | "rule_based" | "constant" | "learned"
+    policy_config: Optional[str] = None        # e.g. configs/rl/fsm_v1.yaml, or a learned policy.pt
     detector_checkpoint: Optional[str] = None  # e.g. results/m7_detector_v1/detector.pt
     constant_action: Optional[tuple] = None    # the "constant" policy's action vector
 
@@ -86,6 +86,11 @@ class RecoveryConfig:
             if self.constant_action is None:
                 raise ValueError("constant policy needs constant_action")
             policy = ConstantPolicy(self.constant_action, spec)
+        elif self.policy == "learned":
+            from rl.policies.learned import LearnedPolicy
+            if self.policy_config is None:
+                raise ValueError("learned policy needs policy_config (the exported policy.pt)")
+            policy = LearnedPolicy(self._path(self.policy_config), spec)
         else:
             raise ValueError(f"unknown policy {self.policy!r}")
         detector = None

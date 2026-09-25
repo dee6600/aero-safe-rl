@@ -1,0 +1,39 @@
+# Recovery-policy training reward, version 1 (M9 task 1). Read only by the
+# Isaac side (isaac/aero_isaac/reward.py): the PX4 side never computes a
+# reward, it judges flights by configs/rl/outcome_v1.yaml, which is also what
+# the terminal values below are keyed on.
+#
+# Frozen before the first training update (milestones.md M9). Changing
+# anything here means a new file (reward_v2.yaml), with the reason written
+# down, never an edit.
+#
+# Never add a ground-truth fault term (CLAUDE.md §1.7 allows one in the
+# reward, but this reward does not need it): every term is judged from the
+# flight's physical result.
+
+reward_version: "1"
+outcome_version: "1"
+
+# Paid once, on the decision step the episode ends, by outcome_v1's verdict.
+# These four numbers alone set what the policy prefers (progress below is
+# shaping and cannot change that). User decision 2026-09-24: with these
+# values, continuing a risky flight beats landing now only when the chance
+# of finishing is at least 70%  (10 p - 10 (1 - p) >= 4).
+terminal:
+  mission_success: 10.0
+  safe_landing: 4.0
+  incomplete: 0.0
+  crash: -10.0
+
+# Times the touchdown's vertical speed (m/s), paid with the terminal value
+# if the drone touched the ground (planned or not). Tells a 2.5 m/s crash
+# from a 6 m/s one, and a 0.7 m/s landing from a 1.9 m/s one.
+touchdown_speed_per_m_s: -1.0
+
+# Progress along the mission path, as exact progress-difference shaping:
+# weight * (discount * P' - P) per decision, P in [0, 1] from the mission
+# tracker (0 on the ground, 1 when the last leg is flown), and P' = 0 on the
+# step the episode ends. Its discounted sum over any episode is zero, so it
+# speeds up learning without changing which policy is best. The discount is
+# the training discount (train_v1.yaml), passed in, never a second copy.
+progress_weight: 2.0

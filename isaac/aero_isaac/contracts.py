@@ -98,5 +98,45 @@ def load_observation_spec(path: Path = CONFIGS / "rl" / "observation_v2.yaml") -
     return ObservationSpec(entries=tuple(raw["entries"]), norm=norm)
 
 
+@dataclass(frozen=True)
+class RewardSpec:
+    """configs/rl/reward_v*.yaml. `terminal` is indexed by outcome code
+    (outcome.py: MISSION_SUCCESS, SAFE_LANDING, CRASH, INCOMPLETE).
+    `success_paid_at`: "episode_end" (v1) or "mission_complete" (v2)."""
+    terminal: tuple[float, float, float, float]
+    touchdown_speed_per_m_s: float
+    progress_weight: float
+    digest: str
+    success_paid_at: str = "episode_end"
+
+
+def load_reward_spec(path: Path = CONFIGS / "rl" / "reward_v2.yaml") -> RewardSpec:
+    raw = yaml.safe_load(Path(path).read_text())
+    t = raw["terminal"]
+    if set(t) != {"mission_success", "safe_landing", "crash", "incomplete"}:
+        raise ValueError(f"{path}: terminal values must cover exactly the four outcomes")
+    paid_at = raw.get("success_paid_at", "episode_end")
+    if paid_at not in ("episode_end", "mission_complete"):
+        raise ValueError(f"{path}: unknown success_paid_at {paid_at!r}")
+    return RewardSpec(
+        terminal=(float(t["mission_success"]), float(t["safe_landing"]), float(t["crash"]),
+                  float(t["incomplete"])),
+        touchdown_speed_per_m_s=float(raw["touchdown_speed_per_m_s"]),
+        progress_weight=float(raw["progress_weight"]), digest=file_digest_of_yaml(path), success_paid_at=paid_at)
+
+
+TRAIN_CONFIG = CONFIGS / "rl" / "train_v3.yaml"          # the one in force (milestones.md M9)
+
+
+def load_train_config(path: Path = TRAIN_CONFIG) -> dict:
+    """The training settings as a plain dict, with their own and their reward
+    file's digests added (a checkpoint records both), and the file's path."""
+    cfg = yaml.safe_load(Path(path).read_text())
+    cfg["digest"] = file_digest_of_yaml(path)
+    cfg["path"] = str(Path(path).resolve().relative_to(REPO))
+    cfg["reward_spec"] = load_reward_spec(REPO / cfg["reward"])
+    return cfg
+
+
 def load_mission(name: str = "square_circuit") -> dict:
     return yaml.safe_load((CONFIGS / "missions" / f"{name}.yaml").read_text())
